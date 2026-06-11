@@ -1,0 +1,30 @@
+[project]
+name = "ft"
+version = "0.1.0"
+description = "Goofing around with Transformer architectures."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "datasets>=2.20",
+    "numpy>=1.26",
+    "pyyaml>=6.0",
+    "requests>=2.32",
+    "swanlab>=0.6",
+    "tokenizers>=0.20",
+    "torch>=2.4",
+    "tqdm>=4.66",
+    "wandb>=0.17",
+    "modelscope>=1.37",
+]
+
+[project.scripts]
+ft-prepare = "ft.prepare_data:main"
+ft-train = "ft.train:main"
+ft-generate = "ft.generate:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+package = true
