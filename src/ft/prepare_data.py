@@ -117,14 +117,13 @@ def prepare_bpe_data(
     output_path: Path,
     train_ratio: float,
     val_ratio: float,
-    lowercase: bool,
     vocab_size: int,
 ) -> None:
     if "all" in texts:
         texts = split_text(texts["all"], train_ratio=train_ratio, val_ratio=val_ratio)
 
     # Train the tokenizer only on training text, then apply the same vocabulary to all splits.
-    tokenizer_meta = train_bpe_tokenizer(texts["train"], lowercase=lowercase, vocab_size=vocab_size)
+    tokenizer_meta = train_bpe_tokenizer(texts["train"], vocab_size=vocab_size)
     encoded = {
         split: torch.tensor(encode_text(text, tokenizer_meta), dtype=torch.long)
         for split, text in texts.items()
@@ -162,7 +161,6 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--raw-dir", default="data/raw")
     parser.add_argument("--output-dir", default="data/processed")
-    parser.add_argument("--lowercase", action="store_true")
     parser.add_argument("--vocab-size", type=int, default=8000, help="Target vocabulary size for BPE.")
     parser.add_argument(
         "--max-chars",
@@ -199,7 +197,6 @@ def main() -> None:
         output_path,
         args.train_ratio,
         args.val_ratio,
-        args.lowercase,
         args.vocab_size,
     )
 

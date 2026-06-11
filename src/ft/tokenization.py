@@ -1,11 +1,7 @@
 UNK_TOKEN = "<unk>"
 
 
-def normalize_text(text: str, lowercase: bool) -> str:
-    return text.lower() if lowercase else text
-
-
-def train_bpe_tokenizer(text: str, lowercase: bool, vocab_size: int) -> dict:
+def train_bpe_tokenizer(text: str, vocab_size: int) -> dict:
     from tokenizers import Tokenizer
     from tokenizers.decoders import ByteLevel as ByteLevelDecoder
     from tokenizers.models import BPE
@@ -18,10 +14,9 @@ def train_bpe_tokenizer(text: str, lowercase: bool, vocab_size: int) -> dict:
     trainer = BpeTrainer(vocab_size=vocab_size, special_tokens=[UNK_TOKEN])
 
     # Train BPE only on the training split to avoid leaking validation/test text.
-    tokenizer.train_from_iterator([normalize_text(text, lowercase)], trainer)
+    tokenizer.train_from_iterator([text], trainer)
     return {
         "type": "bpe",
-        "lowercase": lowercase,
         "vocab_size_target": vocab_size,
         "unk_token": UNK_TOKEN,
         "tokenizer_json": tokenizer.to_str(),
@@ -38,7 +33,6 @@ def load_bpe_tokenizer(tokenizer_meta: dict):
 
 def encode_text(text: str, tokenizer_meta: dict) -> list[int]:
     tokenizer = load_bpe_tokenizer(tokenizer_meta)
-    text = normalize_text(text, tokenizer_meta.get("lowercase", False))
     return tokenizer.encode(text).ids
 
 
