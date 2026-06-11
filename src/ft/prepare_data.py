@@ -1,14 +1,16 @@
 import argparse
 from pathlib import Path
 
-import requests
 import torch
 
 from ft.tokenization import encode_text, tokenizer_vocab_size, train_bpe_tokenizer
 
-
-SHAKESPEARE_URL = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
 HF_DATASETS = {
+    "shakespeare":{
+        "path": "tiny_shakespeare",
+        "splits": {"train": "train", "val": "validation", "test": "test"},
+        "text_column": "text",
+    },
     "tinystories": {
         "path": "roneneldan/TinyStories",
         "splits": {"train": "train", "val": "validation"},
@@ -44,37 +46,29 @@ def read_local_text(path: Path, max_chars: int | None) -> dict[str, str]:
     return {"all": limit_text(path.read_text(encoding="utf-8"), max_chars)}
 
 
-def read_shakespeare(raw_dir: Path, max_chars: int | None) -> dict[str, str]:
-    raw_dir.mkdir(parents=True, exist_ok=True)
-    path = raw_dir / "shakespeare.txt"
-
-    if path.exists():
-        return read_local_text(path, max_chars)
-
-    response = requests.get(SHAKESPEARE_URL, timeout=30)
-    response.raise_for_status()
-    path.write_text(response.text, encoding="utf-8")
-    return {"all": limit_text(response.text, max_chars)}
-
-
 def collect_hf_split(
     dataset_path: str,
     dataset_name: str | None,
     split: str,
     text_column: str,
-    max_chars: int | None,
+    max_chars: int,
 ) -> str:
     from datasets import load_dataset
 
     dataset = load_dataset(dataset_path, dataset_name, split=split, streaming=max_chars is not None)
     parts = []
     char_count = 0
+    row_count = 0
     for row in dataset:
+        if row_count < 5:
+            print(f"processing row {row_count}:\n{row}")
+            row_count +=1
         text = str(row[text_column]).strip()
         if not text:
+            print("warning: encountered empty row!")
             continue
-        text = text + "\n\n"
-        if max_chars is not None and char_count + len(text) > max_chars:
+        text = text + "<|EOS|>"
+        if char_count + len(text) > max_chars:
             remaining = max_chars - char_count
             if remaining > 0:
                 parts.append(text[:remaining])
@@ -84,11 +78,11 @@ def collect_hf_split(
     return "".join(parts)
 
 
-def read_huggingface_dataset(dataset: str, max_chars: int | None) -> dict[str, str]:
+def read_huggingface_dataset(dataset: str, max_chars: int) -> dict[str, str]:
     spec = HF_DATASETS[dataset]
     # Keep validation/test small when preparing a subset; this is enough for model comparison
     # and avoids WSL memory spikes from materializing full Hugging Face splits.
-    eval_max_chars = max(1, max_chars // 20) if max_chars is not None else None
+    eval_max_chars = max(1, max_chars // 20)
     split_limits = {
         "train": max_chars,
         "val": eval_max_chars,
@@ -113,8 +107,6 @@ def read_or_download_dataset(dataset: str, raw_dir: Path, max_chars: int | None)
 
     if path.exists():
         return read_local_text(path, max_chars)
-    if dataset == "shakespeare":
-        return read_shakespeare(raw_dir, max_chars)
     if dataset in HF_DATASETS:
         return read_huggingface_dataset(dataset, max_chars)
 
@@ -168,7 +160,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dataset",
         choices=["shakespeare", "tinystories", "wikitext2"],
-        default="shakespeare",
+        required=True,
     )
     parser.add_argument("--raw-dir", default="data/raw")
     parser.add_argument("--output-dir", default="data/processed")
