@@ -8,7 +8,7 @@ from ft.tokenization import encode_text, tokenizer_vocab_size, train_bpe_tokeniz
 HF_DATASETS = {
     "shakespeare":{
         "path": "tiny_shakespeare",
-        "splits": {"train": "train", "val": "validation", "test": "test"},
+        "splits": {"train": "train", "val": "validation"},
         "text_column": "text",
     },
     "tinystories": {
@@ -19,7 +19,7 @@ HF_DATASETS = {
     "wikitext2": {
         "path": "Salesforce/wikitext",
         "name": "wikitext-2-raw-v1",
-        "splits": {"train": "train", "val": "validation", "test": "test"},
+        "splits": {"train": "train", "val": "validation"},
         "text_column": "text",
     },
 }
@@ -38,7 +38,6 @@ def split_text(text: str, train_ratio: float, val_ratio: float) -> dict[str, str
     return {
         "train": text[:train_end],
         "val": text[train_end:val_end],
-        "test": text[val_end:],
     }
 
 
@@ -80,13 +79,12 @@ def collect_hf_split(
 
 def read_huggingface_dataset(dataset: str, max_chars: int) -> dict[str, str]:
     spec = HF_DATASETS[dataset]
-    # Keep validation/test small when preparing a subset; this is enough for model comparison
+    # Keep validation small when preparing a subset; this is enough for model comparison
     # and avoids WSL memory spikes from materializing full Hugging Face splits.
     eval_max_chars = max(1, max_chars // 20)
     split_limits = {
         "train": max_chars,
         "val": eval_max_chars,
-        "test": eval_max_chars,
     }
 
     texts = {}
@@ -140,7 +138,7 @@ def prepare_bpe_data(
         "vocab_size": actual_vocab_size,
         "train": encoded["train"],
         "val": encoded["val"],
-        "test": encoded.get("test", torch.empty(0, dtype=torch.long)),
+        "test": torch.empty(0, dtype=torch.long),
     }
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -170,7 +168,7 @@ def parse_args() -> argparse.Namespace:
         "--max-chars",
         type=int,
         default=None,
-        help="Optional character limit. For Hugging Face datasets this limits the train split; val/test receive smaller limits.",
+        help="Optional character limit. For Hugging Face datasets this limits the train split; val receive smaller limits.",
     )
     parser.add_argument(
         "--allow-full-dataset",
