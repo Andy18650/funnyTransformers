@@ -6,11 +6,6 @@ import torch
 from ft.tokenization import encode_text, tokenizer_vocab_size, train_bpe_tokenizer
 
 HF_DATASETS = {
-    "shakespeare":{
-        "path": "tiny_shakespeare",
-        "splits": {"train": "train", "val": "validation"},
-        "text_column": "text",
-    },
     "tinystories": {
         "path": "roneneldan/TinyStories",
         "splits": {"train": "train", "val": "validation"},
@@ -81,7 +76,7 @@ def read_huggingface_dataset(dataset: str, max_chars: int) -> dict[str, str]:
     spec = HF_DATASETS[dataset]
     # Keep validation small when preparing a subset; this is enough for model comparison
     # and avoids WSL memory spikes from materializing full Hugging Face splits.
-    eval_max_chars = max(1, max_chars // 20)
+    eval_max_chars = max(1, max_chars // 10)
     split_limits = {
         "train": max_chars,
         "val": eval_max_chars,
@@ -99,7 +94,7 @@ def read_huggingface_dataset(dataset: str, max_chars: int) -> dict[str, str]:
     return texts
 
 
-def read_or_download_dataset(dataset: str, raw_dir: Path, max_chars: int | None) -> dict[str, str]:
+def read_or_download_dataset(dataset: str, raw_dir: Path, max_chars: int) -> dict[str, str]:
     raw_dir.mkdir(parents=True, exist_ok=True)
     path = raw_dir / f"{dataset}.txt"
 
@@ -156,22 +151,17 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Prepare BPE-tokenized language data.")
     parser.add_argument(
         "--dataset",
-        choices=["shakespeare", "tinystories", "wikitext2"],
+        choices=[*HF_DATASETS],
         required=True,
     )
     parser.add_argument("--raw-dir", default="data/raw")
     parser.add_argument("--output-dir", default="data/processed")
-    parser.add_argument("--vocab-size", type=int, default=8000, help="Target vocabulary size for BPE.")
+    parser.add_argument("--vocab-size", type=int, default=8000, help="Target vocabulary size for BPE, DEFAULTS TO 8000.")
     parser.add_argument(
         "--max-chars",
         type=int,
-        default=None,
+        required=True,
         help="Optional character limit. For Hugging Face datasets this limits the train split; val receive smaller limits.",
-    )
-    parser.add_argument(
-        "--allow-full-dataset",
-        action="store_true",
-        help="Allow processing a full Hugging Face dataset without --max-chars. This can use a very large amount of memory.",
     )
     parser.add_argument("--train-ratio", type=float, default=0.9)
     parser.add_argument("--val-ratio", type=float, default=0.05)
