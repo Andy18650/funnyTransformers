@@ -1,4 +1,4 @@
-"""Small language model comparison package."""
+"""Funny Transformers: goofing around with Transformer architectures."""
 
 __all__ = ["__version__"]
 
