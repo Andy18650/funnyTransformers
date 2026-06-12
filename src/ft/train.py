@@ -7,6 +7,7 @@ from tqdm import trange
 
 from ft.data import get_batch, load_processed_data
 from ft.models import build_model
+from ft.prepare_data import HF_DATASETS
 from ft.utils import count_parameters, load_yaml, perplexity, save_json, select_device, set_seed
 
 
@@ -230,7 +231,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dataset",
         required=True,
-        choices=["tinystories", "wikitext2"],
+        choices=[*HF_DATASETS],
         help="Prepared dataset name.",
     )
     parser.add_argument("--data-dir", default="data/processed")

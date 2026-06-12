@@ -17,31 +17,44 @@ HF_DATASETS = {
         "splits": {"train": "train", "val": "validation"},
         "text_column": "text",
     },
+    # Datasets below ship only a train stream; "val" is carved out of it.
+    "tinystories_clean": {
+        "path": "karpathy/tinystories-gpt4-clean",
+        "splits": {"train": "train"},
+        "text_column": "text",
+    },
+    "fineweb_edu": {
+        "path": "karpathy/fineweb-edu-100b-shuffle",
+        "splits": {"train": "train"},
+        "text_column": "text",
+    },
+    "ultrafineweb": {
+        "path": "openbmb/Ultra-FineWeb",
+        # The English data lives in the "en" split; "zh"/"cn" is irrelevant here.
+        "splits": {"train": "en"},
+        "text_column": "content",
+    },
 }
 
 
-def collect_hf_split(
-    dataset_path: str,
-    dataset_name: str | None,
-    split: str,
-    text_column: str,
-    max_chars: int,
-) -> str:
+def stream_hf_documents(spec: dict, split: str):
+    """Yield non-empty documents (with an EOS marker) from one Hugging Face split."""
     from datasets import load_dataset
 
-    dataset = load_dataset(dataset_path, dataset_name, split=split, streaming=True)
-    parts = []
-    char_count = 0
-    row_count = 0
+    dataset = load_dataset(spec["path"], spec.get("name"), split=split, streaming=True)
+    text_column = spec["text_column"]
     for row in dataset:
-        if row_count < 5:
-            print(f"processing row {row_count}:\n{row}")
-            row_count +=1
         text = str(row[text_column]).strip()
         if not text:
-            print("warning: encountered empty row!")
             continue
-        text = text + "<|EOS|>"
+        yield text + "<|EOS|>"
+
+
+def take_chars(documents, max_chars: int) -> str:
+    """Consume documents from an iterator until the char budget is reached."""
+    parts = []
+    char_count = 0
+    for text in documents:
         if char_count + len(text) > max_chars:
             remaining = max_chars - char_count
             if remaining > 0:
@@ -54,24 +67,24 @@ def collect_hf_split(
 
 def read_huggingface_dataset(dataset: str, max_chars: int) -> dict[str, str]:
     spec = HF_DATASETS[dataset]
+    splits = spec["splits"]
     # Keep validation small when preparing a subset; this is enough for model comparison
     # and avoids WSL memory spikes from materializing full Hugging Face splits.
     eval_max_chars = max(1, max_chars // 10)
-    split_limits = {
-        "train": max_chars,
-        "val": eval_max_chars,
-    }
 
-    texts = {}
-    for output_split, hf_split in spec["splits"].items():
-        texts[output_split] = collect_hf_split(
-            dataset_path=spec["path"],
-            dataset_name=spec.get("name"),
-            split=hf_split,
-            text_column=spec["text_column"],
-            max_chars=split_limits[output_split],
-        )
-    return texts
+    if "val" in splits:
+        # Dedicated validation split: read each stream independently.
+        return {
+            "train": take_chars(stream_hf_documents(spec, splits["train"]), max_chars),
+            "val": take_chars(stream_hf_documents(spec, splits["val"]), eval_max_chars),
+        }
+
+    # No validation split: carve one from the head of the train stream, then keep
+    # pulling from the same iterator for train so the two never overlap.
+    documents = stream_hf_documents(spec, splits["train"])
+    val_text = take_chars(documents, eval_max_chars)
+    train_text = take_chars(documents, max_chars)
+    return {"train": train_text, "val": val_text}
 
 
 def prepare_bpe_data(
