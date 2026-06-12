@@ -3,7 +3,13 @@ from pathlib import Path
 
 import torch
 
-from ft.tokenization import encode_text, tokenizer_vocab_size, train_bpe_tokenizer
+from ft.tokenization import (
+    BOS_TOKEN,
+    EOS_TOKEN,
+    encode_text,
+    tokenizer_vocab_size,
+    train_bpe_tokenizer,
+)
 
 HF_DATASETS = {
     "tinystories": {
@@ -47,7 +53,9 @@ def stream_hf_documents(spec: dict, split: str):
         text = str(row[text_column]).strip()
         if not text:
             continue
-        yield text + "<|EOS|>"
+        # Wrap each document so attention/segmentation and generation have explicit
+        # start/end markers: <bos> document <eos>.
+        yield f"{BOS_TOKEN}{text}{EOS_TOKEN}"
 
 
 def take_chars(documents, max_chars: int) -> str:
@@ -106,6 +114,8 @@ def prepare_bpe_data(
         "level": "bpe",
         "tokenizer": tokenizer_meta,
         "vocab_size": actual_vocab_size,
+        "bos_token_id": tokenizer_meta["bos_token_id"],
+        "eos_token_id": tokenizer_meta["eos_token_id"],
         "train": encoded["train"],
         "val": encoded["val"],
         "test": torch.empty(0, dtype=torch.long),

@@ -4,6 +4,7 @@ model:
   num_layers: 4
   num_heads: 4
   feedforward_dim: 1024
+  intra_doc_masking: true
 
 training:
   batch_size: 64

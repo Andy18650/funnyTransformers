@@ -1,4 +1,8 @@
 UNK_TOKEN = "<unk>"
+# Industry-standard markers (cf. GPT-2 / CLIP) for document boundaries.
+BOS_TOKEN = "<|startoftext|>"
+EOS_TOKEN = "<|endoftext|>"
+SPECIAL_TOKENS = [UNK_TOKEN, BOS_TOKEN, EOS_TOKEN]
 
 
 def train_bpe_tokenizer(text: str, vocab_size: int) -> dict:
@@ -11,7 +15,7 @@ def train_bpe_tokenizer(text: str, vocab_size: int) -> dict:
     tokenizer = Tokenizer(BPE(unk_token=UNK_TOKEN))
     tokenizer.pre_tokenizer = ByteLevel(add_prefix_space=True)
     tokenizer.decoder = ByteLevelDecoder()
-    trainer = BpeTrainer(vocab_size=vocab_size, special_tokens=[UNK_TOKEN])
+    trainer = BpeTrainer(vocab_size=vocab_size, special_tokens=SPECIAL_TOKENS)
 
     # Train BPE only on the training split to avoid leaking validation/test text.
     tokenizer.train_from_iterator([text], trainer)
@@ -19,6 +23,10 @@ def train_bpe_tokenizer(text: str, vocab_size: int) -> dict:
         "type": "bpe",
         "vocab_size_target": vocab_size,
         "unk_token": UNK_TOKEN,
+        "bos_token": BOS_TOKEN,
+        "eos_token": EOS_TOKEN,
+        "bos_token_id": tokenizer.token_to_id(BOS_TOKEN),
+        "eos_token_id": tokenizer.token_to_id(EOS_TOKEN),
         "tokenizer_json": tokenizer.to_str(),
     }
 

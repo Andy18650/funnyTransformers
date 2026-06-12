@@ -91,6 +91,24 @@ def validate_data_metadata(data: dict) -> dict:
     return data
 
 
+def language_model_loss(
+    logits: torch.Tensor,
+    x: torch.Tensor,
+    y: torch.Tensor,
+    eos_token_id: int | None,
+) -> torch.Tensor:
+    targets = y
+    if eos_token_id is not None:
+        # Every document is followed by <bos>, so the target after an <eos> is always
+        # <bos> -- a trivial constant prediction. Ignore those positions in the loss.
+        targets = y.masked_fill(x == eos_token_id, -100)
+    return F.cross_entropy(
+        logits.reshape(-1, logits.size(-1)),
+        targets.reshape(-1),
+        ignore_index=-100,
+    )
+
+
 @torch.no_grad()
 def evaluate(
     model: torch.nn.Module,
@@ -100,6 +118,7 @@ def evaluate(
     device: torch.device,
     eval_iters: int,
     seed: int,
+    eos_token_id: int | None,
 ) -> float:
     model.eval()
     # Use a local generator so validation loss is comparable across evaluation points.
@@ -108,7 +127,7 @@ def evaluate(
     for _ in range(eval_iters):
         x, y = get_batch(token_ids, batch_size, sequence_length, device, generator=generator)
         logits = model(x)
-        loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), y.reshape(-1))
+        loss = language_model_loss(logits, x, y, eos_token_id)
         losses.append(loss.item())
     model.train()
     return sum(losses) / len(losses)
@@ -143,9 +162,11 @@ def train(config: dict, disable_wandb: bool = False) -> None:
     device = select_device(training.get("device", "auto"))
     data = validate_data_metadata(load_processed_data(config["data_path"]))
 
+    eos_token_id = data.get("eos_token_id")
     model_config = dict(config["model"])
     if model_config["type"].lower() == "transformer":
         model_config.setdefault("max_sequence_length", training["sequence_length"])
+        model_config["bos_token_id"] = data.get("bos_token_id")
 
     model = build_model(model_config, vocab_size=data["vocab_size"]).to(device)
     param_count = count_parameters(model)
@@ -186,7 +207,7 @@ def train(config: dict, disable_wandb: bool = False) -> None:
             device,
         )
         logits = model(x)
-        loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), y.reshape(-1))
+        loss = language_model_loss(logits, x, y, eos_token_id)
 
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
@@ -208,6 +229,7 @@ def train(config: dict, disable_wandb: bool = False) -> None:
                 device,
                 eval_iters,
                 seed=training.get("seed", 42),
+                eos_token_id=eos_token_id,
             )
             log_row["val_loss"] = val_loss
             log_row["val_perplexity"] = perplexity(val_loss)

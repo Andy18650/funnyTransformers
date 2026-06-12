@@ -26,7 +26,7 @@ class AlibiSelfAttention(nn.Module):
         bias = -self.slopes.to(device) * distances.clamp_min(0).view(1, 1, sequence_length, sequence_length)
         return bias.masked_fill(causal_mask.view(1, 1, sequence_length, sequence_length), float("-inf"))
 
-    def forward(self, hidden: torch.Tensor) -> torch.Tensor:
+    def forward(self, hidden: torch.Tensor, segment_ids: torch.Tensor | None = None) -> torch.Tensor:
         batch_size, sequence_length, embedding_dim = hidden.shape
         qkv = self.qkv(hidden).view(batch_size, sequence_length, 3, self.num_heads, self.head_dim)
         q, k, v = qkv.unbind(dim=2)
@@ -35,6 +35,13 @@ class AlibiSelfAttention(nn.Module):
         v = v.transpose(1, 2)
 
         attn_mask = self.build_alibi_mask(sequence_length, hidden.device)
+        if segment_ids is not None:
+            # Forbid attention across document boundaries: a query may only attend to
+            # keys sharing its segment id. Shapes: segment_ids (B, T) -> cross (B, 1, T, T).
+            cross_document = segment_ids[:, None, :, None] != segment_ids[:, None, None, :]
+            attn_mask = attn_mask.expand(batch_size, -1, -1, -1).masked_fill(
+                cross_document, float("-inf")
+            )
         attended = F.scaled_dot_product_attention(
             q,
             k,
@@ -57,8 +64,8 @@ class TransformerBlock(nn.Module):
             nn.Linear(feedforward_dim, embedding_dim),
         )
 
-    def forward(self, hidden: torch.Tensor) -> torch.Tensor:
-        hidden = hidden + self.attention(self.attention_norm(hidden))
+    def forward(self, hidden: torch.Tensor, segment_ids: torch.Tensor | None = None) -> torch.Tensor:
+        hidden = hidden + self.attention(self.attention_norm(hidden), segment_ids)
         hidden = hidden + self.feedforward(self.feedforward_norm(hidden))
         return hidden
 
@@ -72,10 +79,14 @@ class TransformerLanguageModel(nn.Module):
         num_heads: int,
         max_sequence_length: int,
         feedforward_dim: int | None = None,
+        bos_token_id: int | None = None,
+        intra_doc_masking: bool = False,
     ) -> None:
         super().__init__()
         feedforward_dim = feedforward_dim or embedding_dim * 4
         self.max_sequence_length = max_sequence_length
+        self.bos_token_id = bos_token_id
+        self.intra_doc_masking = intra_doc_masking
         self.token_embedding = nn.Embedding(vocab_size, embedding_dim)
         self.blocks = nn.ModuleList(
             TransformerBlock(embedding_dim, num_heads, feedforward_dim)
@@ -92,7 +103,13 @@ class TransformerLanguageModel(nn.Module):
                 f"{self.max_sequence_length}"
             )
 
+        segment_ids = None
+        if self.intra_doc_masking and self.bos_token_id is not None:
+            # Each <bos> opens a new document, so a running count of <bos> tokens
+            # labels every position with the document it belongs to.
+            segment_ids = torch.cumsum(input_ids == self.bos_token_id, dim=1)
+
         hidden = self.token_embedding(input_ids)
         for block in self.blocks:
-            hidden = block(hidden)
+            hidden = block(hidden, segment_ids)
         return self.output(self.output_norm(hidden))
