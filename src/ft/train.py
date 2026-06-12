@@ -230,7 +230,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dataset",
         required=True,
-        choices=["shakespeare", "tinystories", "wikitext2"],
+        choices=["tinystories", "wikitext2"],
         help="Prepared dataset name.",
     )
     parser.add_argument("--data-dir", default="data/processed")
