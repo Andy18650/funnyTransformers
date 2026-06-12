@@ -20,25 +20,6 @@ HF_DATASETS = {
 }
 
 
-def limit_text(text: str, max_chars: int | None) -> str:
-    if max_chars is None or len(text) <= max_chars:
-        return text
-    return text[:max_chars]
-
-
-def split_text(text: str, train_ratio: float, val_ratio: float) -> dict[str, str]:
-    train_end = int(train_ratio * len(text))
-    val_end = int((train_ratio + val_ratio) * len(text))
-    return {
-        "train": text[:train_end],
-        "val": text[train_end:val_end],
-    }
-
-
-def read_local_text(path: Path, max_chars: int | None) -> dict[str, str]:
-    return {"all": limit_text(path.read_text(encoding="utf-8"), max_chars)}
-
-
 def collect_hf_split(
     dataset_path: str,
     dataset_name: str | None,
@@ -93,29 +74,12 @@ def read_huggingface_dataset(dataset: str, max_chars: int) -> dict[str, str]:
     return texts
 
 
-def read_or_download_dataset(dataset: str, raw_dir: Path, max_chars: int) -> dict[str, str]:
-    raw_dir.mkdir(parents=True, exist_ok=True)
-    path = raw_dir / f"{dataset}.txt"
-
-    if path.exists():
-        return read_local_text(path, max_chars)
-    if dataset in HF_DATASETS:
-        return read_huggingface_dataset(dataset, max_chars)
-
-    raise ValueError(f"Unsupported dataset: {dataset}")
-
-
 def prepare_bpe_data(
     texts: dict[str, str],
     dataset: str,
     output_path: Path,
-    train_ratio: float,
-    val_ratio: float,
     vocab_size: int,
 ) -> None:
-    if "all" in texts:
-        texts = split_text(texts["all"], train_ratio=train_ratio, val_ratio=val_ratio)
-
     # Train the tokenizer only on training text, then apply the same vocabulary to all splits.
     tokenizer_meta = train_bpe_tokenizer(texts["train"], vocab_size=vocab_size)
     encoded = {
@@ -153,33 +117,26 @@ def parse_args() -> argparse.Namespace:
         choices=[*HF_DATASETS],
         required=True,
     )
-    parser.add_argument("--raw-dir", default="data/raw")
     parser.add_argument("--output-dir", default="data/processed")
     parser.add_argument("--vocab-size", type=int, default=8000, help="Target vocabulary size for BPE, DEFAULTS TO 8000.")
     parser.add_argument(
         "--max-chars",
         type=int,
         required=True,
-        help="Character limit. (5,000,000 should be safe, usually 4 times token number) For Hugging Face datasets this limits the train split; val receive smaller limits.",
+        help="Character limit. (5,000,000 should be safe, usually 4 times token number) "
+        "This limits the train split; val receives a smaller limit.",
     )
-    parser.add_argument("--train-ratio", type=float, default=0.9)
-    parser.add_argument("--val-ratio", type=float, default=0.05)
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    if args.train_ratio <= 0 or args.val_ratio <= 0 or args.train_ratio + args.val_ratio >= 1:
-        raise ValueError("Expected train_ratio > 0, val_ratio > 0, and train_ratio + val_ratio < 1.")
-
-    texts = read_or_download_dataset(args.dataset, Path(args.raw_dir), args.max_chars)
+    texts = read_huggingface_dataset(args.dataset, args.max_chars)
     output_path = Path(args.output_dir) / f"{args.dataset}_bpe.pt"
     prepare_bpe_data(
         texts,
         args.dataset,
         output_path,
-        args.train_ratio,
-        args.val_ratio,
         args.vocab_size,
     )
 
