@@ -1,4 +1,5 @@
 import argparse
+import os
 import secrets
 from datetime import datetime
 from pathlib import Path
@@ -17,6 +18,20 @@ def generate_run_id() -> str:
     # wandb-style unique id: sortable timestamp plus random suffix so that runs
     # never collide, regardless of how similar their configurations are.
     return f"{datetime.now():%Y%m%d-%H%M%S}-{secrets.token_hex(3)}"
+
+
+def update_latest_link(output_dir: Path, link_path: Path = Path("checkpoints/latest")) -> None:
+    """Point a stable 'latest' symlink at this run's directory for easy reuse."""
+    link_path.parent.mkdir(parents=True, exist_ok=True)
+    # Use a relative target so the link survives the tree being moved/copied.
+    target = Path(os.path.relpath(output_dir.resolve(), link_path.parent.resolve()))
+    try:
+        if link_path.is_symlink() or link_path.exists():
+            link_path.unlink()
+        link_path.symlink_to(target, target_is_directory=True)
+    except OSError as error:
+        # Symlinks may be unavailable (e.g. some Windows setups); not fatal.
+        print(f"warning: could not update {link_path} -> {target}: {error}")
 
 
 def format_run_note(note: str | None) -> str:
@@ -183,6 +198,7 @@ def train(config: dict, disable_wandb: bool = False) -> None:
     output_dir = Path(config["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
     save_json(config, output_dir / "config.json")
+    update_latest_link(output_dir)
 
     run = maybe_init_wandb(config, enabled=not disable_wandb)
     if run is not None:
