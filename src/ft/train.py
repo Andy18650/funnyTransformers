@@ -1,4 +1,6 @@
 import argparse
+import secrets
+from datetime import datetime
 from pathlib import Path
 
 import torch
@@ -11,13 +13,10 @@ from ft.prepare_data import HF_DATASETS
 from ft.utils import count_parameters, load_yaml, perplexity, save_json, select_device, set_seed
 
 
-def model_signature(model_config: dict) -> str:
-    model_type = model_config["type"].lower()
-    parts = [model_type]
-    for key in ("embedding_dim", "hidden_dim", "num_layers", "num_heads"):
-        if key in model_config:
-            parts.append(f"{key}-{model_config[key]}")
-    return "_".join(parts)
+def generate_run_id() -> str:
+    # wandb-style unique id: sortable timestamp plus random suffix so that runs
+    # never collide, regardless of how similar their configurations are.
+    return f"{datetime.now():%Y%m%d-%H%M%S}-{secrets.token_hex(3)}"
 
 
 def format_run_note(note: str | None) -> str:
@@ -39,8 +38,7 @@ def build_experiment_config(
     note: str | None,
 ) -> dict:
     model_config = dict(config["model"])
-    signature = model_signature(model_config)
-    resolved_output_dir = output_dir or str(Path("runs") / dataset / signature)
+    resolved_output_dir = output_dir or str(Path("checkpoints") / dataset / generate_run_id())
     return {
         "name": f"{model_config['type'].lower()}_{dataset}",
         "dataset": dataset,
@@ -260,7 +258,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         default=None,
-        help="Optional output directory. Defaults to runs/<dataset>/<model-signature>.",
+        help="Optional output directory. Defaults to checkpoints/<dataset>/<timestamp-id>.",
     )
     parser.add_argument("--wandb-project", required=True)
     parser.add_argument("--wandb-mode", default="online", choices=["online", "offline", "disabled"])

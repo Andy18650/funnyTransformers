@@ -57,7 +57,7 @@ uv run ft-train \
 
 Model and training hyperparameters live in `configs/transformer.yaml`,
 including `intra_doc_masking`. Checkpoints and the resolved config are written
-to `runs/<dataset>/<model-signature>/`. To run without logging, add
+to `checkpoints/<dataset>/<timestamp-id>/`. To run without logging, add
 `--no-wandb` (or `--wandb-mode disabled`).
 
 ## Generation
@@ -66,7 +66,7 @@ Sample from a trained checkpoint:
 
 ```bash
 uv run ft-generate \
-  --checkpoint runs/fineweb_edu/transformer_.../best.pt \
+  --checkpoint checkpoints/fineweb_edu/20260614-153012-a1b2c3/best.pt \
   --prompt "Once upon a time" \
   --max-new-tokens 200
 ```
