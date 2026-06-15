@@ -20,6 +20,15 @@ def generate_run_id() -> str:
     return f"{datetime.now():%Y%m%d-%H%M%S}-{secrets.token_hex(3)}"
 
 
+def resolve_precision(precision: str, device: torch.device) -> str:
+    """Turn 'auto' into a concrete autocast precision for this device."""
+    if precision != "auto":
+        return precision
+    if device.type == "cuda":
+        return "bf16" if torch.cuda.is_bf16_supported() else "fp16"
+    return "fp32"
+
+
 def update_latest_link(output_dir: Path, link_path: Path = Path("checkpoints/latest")) -> None:
     """Point a stable 'latest' symlink at this run's directory for easy reuse."""
     link_path.parent.mkdir(parents=True, exist_ok=True)
@@ -51,6 +60,9 @@ def build_experiment_config(
     swanlab_mode: str,
     compile_model: bool,
     note: str | None,
+    precision: str = "auto",
+    tf32: bool = False,
+    native_bf16: bool = False,
 ) -> dict:
     model_config = dict(config["model"])
     resolved_output_dir = output_dir or str(Path("checkpoints") / dataset / generate_run_id())
@@ -63,6 +75,9 @@ def build_experiment_config(
         "model": model_config,
         "training": dict(config["training"]),
         "compile": compile_model,
+        "precision": precision,
+        "tf32": tf32,
+        "native_bf16": native_bf16,
         "note": note,
         "wandb": {
             "project": wandb_project,
@@ -132,6 +147,8 @@ def evaluate(
     eval_iters: int,
     seed: int,
     eos_token_id: int | None,
+    amp_dtype: torch.dtype | None = None,
+    use_amp: bool = False,
 ) -> float:
     model.eval()
     # Use a local generator so validation loss is comparable across evaluation points.
@@ -139,8 +156,9 @@ def evaluate(
     losses = []
     for _ in range(eval_iters):
         x, y = get_batch(token_ids, batch_size, sequence_length, device, generator=generator)
-        logits = model(x)
-        loss = language_model_loss(logits, x, y, eos_token_id)
+        with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
+            logits = model(x)
+            loss = language_model_loss(logits, x, y, eos_token_id)
         losses.append(loss.item())
     model.train()
     return sum(losses) / len(losses)
@@ -175,6 +193,31 @@ def train(config: dict, disable_wandb: bool = False) -> None:
     device = select_device(training.get("device", "auto"))
     data = validate_data_metadata(load_processed_data(config["data_path"]))
 
+    # --- Precision setup -------------------------------------------------
+    if config.get("tf32") and device.type == "cuda":
+        # Enables TF32 tensor cores for float32 matmuls (Ampere+). No-op on
+        # older GPUs (e.g. Turing/2080 Ti) and on CPU.
+        torch.set_float32_matmul_precision("high")
+
+    requested_precision = config.get("precision", "auto")
+    native_bf16 = config.get("native_bf16", False)
+    if native_bf16:
+        if requested_precision in ("bf16", "fp16"):
+            print(
+                f"warning: --native-bf16 is incompatible with --precision {requested_precision} "
+                "(autocast). Disabling autocast and casting weights to bfloat16 instead."
+            )
+        if device.type != "cuda":
+            print("warning: --native-bf16 requested on a non-CUDA device; this may be slow.")
+        precision = "fp32"  # native cast handles dtype; no autocast wrapper
+    else:
+        precision = resolve_precision(requested_precision, device)
+
+    use_amp = precision in ("bf16", "fp16") and device.type == "cuda"
+    amp_dtype = torch.float16 if precision == "fp16" else torch.bfloat16
+    effective_precision = "native_bf16" if native_bf16 else precision
+    print(f"precision: {effective_precision} (autocast={use_amp}, tf32={bool(config.get('tf32'))})")
+
     eos_token_id = data.get("eos_token_id")
     model_config = dict(config["model"])
     if model_config["type"].lower() == "transformer":
@@ -182,6 +225,8 @@ def train(config: dict, disable_wandb: bool = False) -> None:
         model_config["bos_token_id"] = data.get("bos_token_id")
 
     model = build_model(model_config, vocab_size=data["vocab_size"]).to(device)
+    if native_bf16:
+        model = model.to(torch.bfloat16)
     param_count = count_parameters(model)
     config["name"] = (
         f"{model_config['type'].lower()}_{config['dataset']}_{param_count}"
@@ -189,6 +234,7 @@ def train(config: dict, disable_wandb: bool = False) -> None:
     )
     if config.get("compile", False):
         model = torch.compile(model)
+    scaler = torch.amp.GradScaler(device.type, enabled=(precision == "fp16"))
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=training["learning_rate"],
@@ -204,6 +250,7 @@ def train(config: dict, disable_wandb: bool = False) -> None:
     if run is not None:
         run.summary["parameters"] = param_count
         run.summary["device"] = str(device)
+        run.summary["precision"] = effective_precision
 
     total_steps = training["steps"]
     train_log_interval = training.get("train_log_interval", 50)
@@ -220,15 +267,19 @@ def train(config: dict, disable_wandb: bool = False) -> None:
             training["sequence_length"],
             device,
         )
-        logits = model(x)
-        loss = language_model_loss(logits, x, y, eos_token_id)
+        with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
+            logits = model(x)
+            loss = language_model_loss(logits, x, y, eos_token_id)
 
         optimizer.zero_grad(set_to_none=True)
-        loss.backward()
+        scaler.scale(loss).backward()
         grad_clip = training.get("grad_clip")
         if grad_clip is not None:
+            # Unscale before clipping so the threshold applies to real gradients.
+            scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-        optimizer.step()
+        scaler.step(optimizer)
+        scaler.update()
 
         if step % train_log_interval == 0 or step == total_steps:
             log_row["train_loss"] = loss.item()
@@ -244,6 +295,8 @@ def train(config: dict, disable_wandb: bool = False) -> None:
                 eval_iters,
                 seed=training.get("seed", 42),
                 eos_token_id=eos_token_id,
+                amp_dtype=amp_dtype,
+                use_amp=use_amp,
             )
             log_row["val_loss"] = val_loss
             log_row["val_perplexity"] = perplexity(val_loss)
@@ -285,6 +338,22 @@ def parse_args() -> argparse.Namespace:
         help="Sync W&B logs to SwanLab. SwanLab sync is disabled by default.",
     )
     parser.add_argument("--compile", action="store_true", help="Compile the model with torch.compile.")
+    parser.add_argument(
+        "--precision",
+        choices=["auto", "fp32", "bf16", "fp16"],
+        default="auto",
+        help="Autocast precision. 'auto' picks bf16 if supported, else fp16 on CUDA, else fp32.",
+    )
+    parser.add_argument(
+        "--tf32",
+        action="store_true",
+        help="Enable TF32 matmul precision ('high') for float32 matmuls on Ampere+ GPUs.",
+    )
+    parser.add_argument(
+        "--native-bf16",
+        action="store_true",
+        help="Cast model weights to bfloat16 (no autocast). Incompatible with --precision bf16/fp16.",
+    )
     parser.add_argument("--note", default=None, help="Optional suffix for the run name.")
     parser.add_argument("--no-wandb", action="store_true", help="Disable W&B logging for this run.")
     return parser.parse_args()
@@ -302,6 +371,9 @@ def main() -> None:
         swanlab_mode=args.swanlab_mode,
         compile_model=args.compile,
         note=args.note,
+        precision=args.precision,
+        tf32=args.tf32,
+        native_bf16=args.native_bf16,
     )
     train(config, disable_wandb=args.no_wandb or args.wandb_mode == "disabled")
 
