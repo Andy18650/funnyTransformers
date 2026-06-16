@@ -4,7 +4,11 @@ model:
   num_layers: 4
   num_heads: 4
   feedforward_dim: 1536
-  activation: sigmoid  # gelu | relu | tanh | sigmoid | silu | softplus | sqrt_softplus
+  # gelu | relu | tanh | sigmoid | silu | softplus | sqrt_softplus
+  # | scaled_tanh | scaled_sigmoid  (scaled_* add a per-channel learnable scale
+  # that frees the activation's output range)
+  activation: sqrt_softplus
+  ffn_gate: none  # none | linear  (linear adds a gated branch, e.g. silu+linear = SwiGLU)
   intra_doc_masking: true
 
 training:

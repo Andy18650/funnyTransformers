@@ -11,6 +11,21 @@ class SqrtSoftplus(nn.Module):
         return torch.sqrt(F.softplus(x))
 
 
+class ScaledActivation(nn.Module):
+    """A bounded activation with a per-channel learnable scale (like an RMSNorm
+    gain). Multiplying by a learned scale frees up the otherwise fixed output
+    range of saturating functions such as tanh ([-1, 1]) and sigmoid ([0, 1])."""
+
+    def __init__(self, fn, num_features: int) -> None:
+        super().__init__()
+        self.fn = fn
+        self.scale = nn.Parameter(torch.ones(num_features))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.scale * self.fn(x)
+
+
+# Plain activations, instantiated with no arguments.
 ACTIVATIONS = {
     "gelu": nn.GELU,
     "relu": nn.ReLU,
@@ -21,14 +36,21 @@ ACTIVATIONS = {
     "sqrt_softplus": SqrtSoftplus,
 }
 
+# Activations with a per-channel learnable scale; need the feature dimension.
+SCALED_ACTIVATIONS = {
+    "scaled_tanh": torch.tanh,
+    "scaled_sigmoid": torch.sigmoid,
+}
 
-def build_activation(name: str) -> nn.Module:
+
+def build_activation(name: str, num_features: int) -> nn.Module:
     name = name.lower()
-    if name not in ACTIVATIONS:
-        raise ValueError(
-            f"Unsupported activation '{name}'. Choose from: {', '.join(sorted(ACTIVATIONS))}."
-        )
-    return ACTIVATIONS[name]()
+    if name in ACTIVATIONS:
+        return ACTIVATIONS[name]()
+    if name in SCALED_ACTIVATIONS:
+        return ScaledActivation(SCALED_ACTIVATIONS[name], num_features)
+    valid = sorted([*ACTIVATIONS, *SCALED_ACTIVATIONS])
+    raise ValueError(f"Unsupported activation '{name}'. Choose from: {', '.join(valid)}.")
 
 
 def alibi_slopes(num_heads: int) -> torch.Tensor:
@@ -80,6 +102,38 @@ class AlibiSelfAttention(nn.Module):
         return self.output(attended)
 
 
+class FeedForward(nn.Module):
+    """Transformer FFN with an optional gated linear branch.
+
+    gate="none":   down(act(up(x)))                  -- standard FFN
+    gate="linear": down(act(up(x)) * value(x))       -- GLU variant (e.g. SwiGLU
+                   when activation="silu"), where value is a parallel linear
+                   up-projection with no activation.
+    """
+
+    def __init__(
+        self,
+        embedding_dim: int,
+        feedforward_dim: int,
+        activation: str = "gelu",
+        gate: str = "none",
+    ) -> None:
+        super().__init__()
+        if gate not in ("none", "linear"):
+            raise ValueError(f"Unsupported gate '{gate}'. Choose from: linear, none.")
+        self.gate = gate
+        self.up = nn.Linear(embedding_dim, feedforward_dim)
+        self.activation = build_activation(activation, feedforward_dim)
+        self.value = nn.Linear(embedding_dim, feedforward_dim) if gate == "linear" else None
+        self.down = nn.Linear(feedforward_dim, embedding_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        hidden = self.activation(self.up(x))
+        if self.value is not None:
+            hidden = hidden * self.value(x)
+        return self.down(hidden)
+
+
 class TransformerBlock(nn.Module):
     def __init__(
         self,
@@ -87,16 +141,13 @@ class TransformerBlock(nn.Module):
         num_heads: int,
         feedforward_dim: int,
         activation: str = "gelu",
+        ffn_gate: str = "none",
     ) -> None:
         super().__init__()
         self.attention_norm = nn.LayerNorm(embedding_dim)
         self.attention = AlibiSelfAttention(embedding_dim, num_heads)
         self.feedforward_norm = nn.LayerNorm(embedding_dim)
-        self.feedforward = nn.Sequential(
-            nn.Linear(embedding_dim, feedforward_dim),
-            build_activation(activation),
-            nn.Linear(feedforward_dim, embedding_dim),
-        )
+        self.feedforward = FeedForward(embedding_dim, feedforward_dim, activation, ffn_gate)
 
     def forward(self, hidden: torch.Tensor, segment_ids: torch.Tensor | None = None) -> torch.Tensor:
         hidden = hidden + self.attention(self.attention_norm(hidden), segment_ids)
@@ -114,6 +165,7 @@ class TransformerLanguageModel(nn.Module):
         max_sequence_length: int,
         feedforward_dim: int | None = None,
         activation: str = "gelu",
+        ffn_gate: str = "none",
         bos_token_id: int | None = None,
         intra_doc_masking: bool = False,
     ) -> None:
@@ -124,7 +176,7 @@ class TransformerLanguageModel(nn.Module):
         self.intra_doc_masking = intra_doc_masking
         self.token_embedding = nn.Embedding(vocab_size, embedding_dim)
         self.blocks = nn.ModuleList(
-            TransformerBlock(embedding_dim, num_heads, feedforward_dim, activation)
+            TransformerBlock(embedding_dim, num_heads, feedforward_dim, activation, ffn_gate)
             for _ in range(num_layers)
         )
         self.output_norm = nn.LayerNorm(embedding_dim)
