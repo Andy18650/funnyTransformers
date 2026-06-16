@@ -62,6 +62,12 @@ to `checkpoints/<dataset>/<timestamp-id>/`, and `checkpoints/latest` is a
 symlink updated to point at the most recent run. To run without logging, add
 `--no-wandb` (or `--wandb-mode disabled`).
 
+The wandb run name can be templated via `training.run_name`, a `str.format`
+string with access to any model/training field plus `{dataset}`,
+`{precision}`, `{param_count}`, and `{note}` — e.g. `"{activation}_{param_count}"`
+to name a run after whatever you are comparing. If unset, it defaults to
+`type_dataset_params[_note]`.
+
 Training requires CUDA. Precision is selected with `--precision`:
 
 - `fp16` (default): autocast with a `GradScaler`; works on all CUDA GPUs.

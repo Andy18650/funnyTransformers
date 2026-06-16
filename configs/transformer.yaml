@@ -8,6 +8,10 @@ model:
   intra_doc_masking: true
 
 training:
+  # Optional str.format template naming the run after whatever you compare this
+  # round. Fields: any model/training key plus {dataset} {precision}
+  # {param_count} {note}. Falls back to type_dataset_params[_note] if unset.
+  run_name: "{activation}_{param_count}"
   batch_size: 64
   sequence_length: 128
   learning_rate: 0.0005

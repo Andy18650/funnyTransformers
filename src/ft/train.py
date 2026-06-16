@@ -41,6 +41,43 @@ def format_run_note(note: str | None) -> str:
     return f"_{normalized}" if normalized else ""
 
 
+def render_run_name(config: dict, param_count: int) -> str:
+    """Build the run name.
+
+    If training.run_name is set, it is treated as a str.format template with
+    access to every model and training field plus a few computed values
+    (e.g. {activation}, {learning_rate}, {param_count}, {note}). This lets each
+    round name itself after whatever variable is being compared. Otherwise it
+    falls back to the default type_dataset_params[_note] scheme.
+    """
+    model_config = config["model"]
+    note = config.get("note")
+    fields = {
+        **config["training"],
+        **model_config,
+        "dataset": config["dataset"],
+        "precision": config.get("precision"),
+        "param_count": param_count,
+        "note": note or "",
+    }
+
+    template = config["training"].get("run_name")
+    if template:
+        try:
+            name = template.format(**fields)
+        except KeyError as error:
+            raise SystemExit(
+                f"error: run_name template references unknown field {error}. "
+                f"Available: {', '.join(sorted(fields))}."
+            )
+        return "_".join(name.strip().split())  # normalize whitespace
+
+    return (
+        f"{model_config['type'].lower()}_{config['dataset']}_{param_count}"
+        f"{format_run_note(note)}"
+    )
+
+
 def build_experiment_config(
     config: dict,
     dataset: str,
@@ -207,10 +244,7 @@ def train(config: dict, disable_wandb: bool = False) -> None:
     except RuntimeError as error:
         raise SystemExit(f"error: failed to initialize model on CUDA: {error}")
     param_count = count_parameters(model)
-    config["name"] = (
-        f"{model_config['type'].lower()}_{config['dataset']}_{param_count}"
-        f"{format_run_note(config.get('note'))}"
-    )
+    config["name"] = render_run_name(config, param_count)
     if config.get("compile", False):
         model = torch.compile(model)
     scaler = torch.amp.GradScaler(device.type, enabled=(precision == "fp16"))
