@@ -1,10 +1,10 @@
 model:
   type: transformer
-  embedding_dim: 512
-  num_layers: 8
+  embedding_dim: 384
+  num_layers: 4
   num_heads: 4
-  feedforward_dim: 2048
-  activation: gelu  # gelu | relu | tanh | sigmoid | silu
+  feedforward_dim: 1536
+  activation: sigmoid  # gelu | relu | tanh | sigmoid | silu | softplus | sqrt_softplus
   intra_doc_masking: true
 
 training:

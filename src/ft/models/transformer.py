@@ -2,12 +2,23 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+
+class SqrtSoftplus(nn.Module):
+    """sqrt(softplus(x)): smooth and positive, but keeps growing (~sqrt(x)) for
+    large inputs instead of saturating, giving nonlinearity even far from 0."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.sqrt(F.softplus(x))
+
+
 ACTIVATIONS = {
     "gelu": nn.GELU,
     "relu": nn.ReLU,
     "tanh": nn.Tanh,
     "sigmoid": nn.Sigmoid,
     "silu": nn.SiLU,
+    "softplus": nn.Softplus,
+    "sqrt_softplus": SqrtSoftplus,
 }
 
 

@@ -12,7 +12,8 @@ experimental architectures over time.
 - Streaming data preparation from Hugging Face datasets, with validation
   carved out of the train stream when a dataset ships no validation split.
 - Baseline Transformer with ALiBi positional biases.
-- Configurable feedforward `activation` (gelu, relu, tanh, sigmoid, silu).
+- Configurable feedforward `activation` (gelu, relu, tanh, sigmoid, silu,
+  softplus, sqrt_softplus).
 - Optional **intra-document masking**: tokens never attend across document
   boundaries within a packed training window (toggle in the config).
 - Training with Weights & Biases / SwanLab logging.
