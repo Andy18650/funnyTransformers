@@ -2,6 +2,23 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+ACTIVATIONS = {
+    "gelu": nn.GELU,
+    "relu": nn.ReLU,
+    "tanh": nn.Tanh,
+    "sigmoid": nn.Sigmoid,
+    "silu": nn.SiLU,
+}
+
+
+def build_activation(name: str) -> nn.Module:
+    name = name.lower()
+    if name not in ACTIVATIONS:
+        raise ValueError(
+            f"Unsupported activation '{name}'. Choose from: {', '.join(sorted(ACTIVATIONS))}."
+        )
+    return ACTIVATIONS[name]()
+
 
 def alibi_slopes(num_heads: int) -> torch.Tensor:
     # Simple monotonic slopes are enough here: each head gets a different distance penalty.
@@ -53,14 +70,20 @@ class AlibiSelfAttention(nn.Module):
 
 
 class TransformerBlock(nn.Module):
-    def __init__(self, embedding_dim: int, num_heads: int, feedforward_dim: int) -> None:
+    def __init__(
+        self,
+        embedding_dim: int,
+        num_heads: int,
+        feedforward_dim: int,
+        activation: str = "gelu",
+    ) -> None:
         super().__init__()
         self.attention_norm = nn.LayerNorm(embedding_dim)
         self.attention = AlibiSelfAttention(embedding_dim, num_heads)
         self.feedforward_norm = nn.LayerNorm(embedding_dim)
         self.feedforward = nn.Sequential(
             nn.Linear(embedding_dim, feedforward_dim),
-            nn.GELU(),
+            build_activation(activation),
             nn.Linear(feedforward_dim, embedding_dim),
         )
 
@@ -79,6 +102,7 @@ class TransformerLanguageModel(nn.Module):
         num_heads: int,
         max_sequence_length: int,
         feedforward_dim: int | None = None,
+        activation: str = "gelu",
         bos_token_id: int | None = None,
         intra_doc_masking: bool = False,
     ) -> None:
@@ -89,7 +113,7 @@ class TransformerLanguageModel(nn.Module):
         self.intra_doc_masking = intra_doc_masking
         self.token_embedding = nn.Embedding(vocab_size, embedding_dim)
         self.blocks = nn.ModuleList(
-            TransformerBlock(embedding_dim, num_heads, feedforward_dim)
+            TransformerBlock(embedding_dim, num_heads, feedforward_dim, activation)
             for _ in range(num_layers)
         )
         self.output_norm = nn.LayerNorm(embedding_dim)
