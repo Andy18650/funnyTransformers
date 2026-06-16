@@ -11,22 +11,13 @@ from tqdm import trange
 from ft.data import get_batch, load_processed_data
 from ft.models import build_model
 from ft.prepare_data import HF_DATASETS
-from ft.utils import count_parameters, load_yaml, perplexity, save_json, select_device, set_seed
+from ft.utils import count_parameters, load_yaml, perplexity, save_json, set_seed
 
 
 def generate_run_id() -> str:
     # wandb-style unique id: sortable timestamp plus random suffix so that runs
     # never collide, regardless of how similar their configurations are.
     return f"{datetime.now():%Y%m%d-%H%M%S}-{secrets.token_hex(3)}"
-
-
-def resolve_precision(precision: str, device: torch.device) -> str:
-    """Turn 'auto' into a concrete autocast precision for this device."""
-    if precision != "auto":
-        return precision
-    if device.type == "cuda":
-        return "bf16" if torch.cuda.is_bf16_supported() else "fp16"
-    return "fp32"
 
 
 def update_latest_link(output_dir: Path, link_path: Path = Path("checkpoints/latest")) -> None:
@@ -60,9 +51,7 @@ def build_experiment_config(
     swanlab_mode: str,
     compile_model: bool,
     note: str | None,
-    precision: str = "auto",
-    tf32: bool = False,
-    native_bf16: bool = False,
+    precision: str = "fp16",
 ) -> dict:
     model_config = dict(config["model"])
     resolved_output_dir = output_dir or str(Path("checkpoints") / dataset / generate_run_id())
@@ -76,8 +65,6 @@ def build_experiment_config(
         "training": dict(config["training"]),
         "compile": compile_model,
         "precision": precision,
-        "tf32": tf32,
-        "native_bf16": native_bf16,
         "note": note,
         "wandb": {
             "project": wandb_project,
@@ -190,33 +177,24 @@ def save_checkpoint(
 def train(config: dict, disable_wandb: bool = False) -> None:
     training = config["training"]
     set_seed(training.get("seed", 42))
-    device = select_device(training.get("device", "auto"))
-    data = validate_data_metadata(load_processed_data(config["data_path"]))
+
+    # Training assumes CUDA; there is no point training these models on CPU.
+    if not torch.cuda.is_available():
+        raise SystemExit("error: CUDA is required for training but is not available.")
+    device = torch.device("cuda")
 
     # --- Precision setup -------------------------------------------------
-    if config.get("tf32") and device.type == "cuda":
-        # Enables TF32 tensor cores for float32 matmuls (Ampere+). No-op on
-        # older GPUs (e.g. Turing/2080 Ti) and on CPU.
-        torch.set_float32_matmul_precision("high")
-
-    requested_precision = config.get("precision", "auto")
-    native_bf16 = config.get("native_bf16", False)
-    if native_bf16:
-        if requested_precision in ("bf16", "fp16"):
-            print(
-                f"warning: --native-bf16 is incompatible with --precision {requested_precision} "
-                "(autocast). Disabling autocast and casting weights to bfloat16 instead."
-            )
-        if device.type != "cuda":
-            print("warning: --native-bf16 requested on a non-CUDA device; this may be slow.")
-        precision = "fp32"  # native cast handles dtype; no autocast wrapper
-    else:
-        precision = resolve_precision(requested_precision, device)
-
-    use_amp = precision in ("bf16", "fp16") and device.type == "cuda"
+    precision = config.get("precision", "fp16")
+    if precision == "bf16" and not torch.cuda.is_bf16_supported():
+        raise SystemExit(
+            "error: bf16 precision requested but this GPU does not support it. "
+            "Use --precision fp16 or fp32."
+        )
+    use_amp = precision in ("bf16", "fp16")
     amp_dtype = torch.float16 if precision == "fp16" else torch.bfloat16
-    effective_precision = "native_bf16" if native_bf16 else precision
-    print(f"precision: {effective_precision} (autocast={use_amp}, tf32={bool(config.get('tf32'))})")
+    print(f"precision: {precision} (autocast={use_amp})")
+
+    data = validate_data_metadata(load_processed_data(config["data_path"]))
 
     eos_token_id = data.get("eos_token_id")
     model_config = dict(config["model"])
@@ -224,9 +202,10 @@ def train(config: dict, disable_wandb: bool = False) -> None:
         model_config.setdefault("max_sequence_length", training["sequence_length"])
         model_config["bos_token_id"] = data.get("bos_token_id")
 
-    model = build_model(model_config, vocab_size=data["vocab_size"]).to(device)
-    if native_bf16:
-        model = model.to(torch.bfloat16)
+    try:
+        model = build_model(model_config, vocab_size=data["vocab_size"]).to(device)
+    except RuntimeError as error:
+        raise SystemExit(f"error: failed to initialize model on CUDA: {error}")
     param_count = count_parameters(model)
     config["name"] = (
         f"{model_config['type'].lower()}_{config['dataset']}_{param_count}"
@@ -250,7 +229,7 @@ def train(config: dict, disable_wandb: bool = False) -> None:
     if run is not None:
         run.summary["parameters"] = param_count
         run.summary["device"] = str(device)
-        run.summary["precision"] = effective_precision
+        run.summary["precision"] = precision
 
     total_steps = training["steps"]
     train_log_interval = training.get("train_log_interval", 50)
@@ -340,19 +319,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--compile", action="store_true", help="Compile the model with torch.compile.")
     parser.add_argument(
         "--precision",
-        choices=["auto", "fp32", "bf16", "fp16"],
-        default="auto",
-        help="Autocast precision. 'auto' picks bf16 if supported, else fp16 on CUDA, else fp32.",
-    )
-    parser.add_argument(
-        "--tf32",
-        action="store_true",
-        help="Enable TF32 matmul precision ('high') for float32 matmuls on Ampere+ GPUs.",
-    )
-    parser.add_argument(
-        "--native-bf16",
-        action="store_true",
-        help="Cast model weights to bfloat16 (no autocast). Incompatible with --precision bf16/fp16.",
+        choices=["fp32", "bf16", "fp16"],
+        default="fp16",
+        help="Mixed-precision autocast dtype. Defaults to fp16 (with GradScaler).",
     )
     parser.add_argument("--note", default=None, help="Optional suffix for the run name.")
     parser.add_argument("--no-wandb", action="store_true", help="Disable W&B logging for this run.")
@@ -372,8 +341,6 @@ def main() -> None:
         compile_model=args.compile,
         note=args.note,
         precision=args.precision,
-        tf32=args.tf32,
-        native_bf16=args.native_bf16,
     )
     train(config, disable_wandb=args.no_wandb or args.wandb_mode == "disabled")
 

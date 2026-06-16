@@ -61,15 +61,12 @@ to `checkpoints/<dataset>/<timestamp-id>/`, and `checkpoints/latest` is a
 symlink updated to point at the most recent run. To run without logging, add
 `--no-wandb` (or `--wandb-mode disabled`).
 
-Precision flags (hardware-specific, so they are CLI options rather than config):
+Training requires CUDA. Precision is selected with `--precision`:
 
-- `--precision {auto,fp32,bf16,fp16}`: autocast precision. `auto` uses bf16 when
-  supported (Ampere+), otherwise fp16 on CUDA (e.g. Turing/2080 Ti), else fp32.
-  fp16 automatically uses a `GradScaler`.
-- `--tf32`: enable TF32 matmul tensor cores for float32 matmuls (Ampere+; no-op
-  on older GPUs).
-- `--native-bf16`: cast model weights to bfloat16 instead of using autocast.
-  Incompatible with `--precision bf16/fp16` (a warning is printed).
+- `fp16` (default): autocast with a `GradScaler`; works on all CUDA GPUs.
+- `bf16`: autocast in bfloat16 (requires an Ampere+ GPU; exits with an error
+  otherwise).
+- `fp32`: full precision, for highest-precision sanity checks.
 
 ## Generation
 
