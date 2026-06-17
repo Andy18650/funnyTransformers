@@ -23,11 +23,8 @@ ACTIVATIONS = {
 }
 
 
-def build_activation(name: str, num_features: int) -> nn.Module:
-    name = name.lower()
-    if name in ACTIVATIONS:
-        return ACTIVATIONS[name]()
-    raise ValueError(f"Unsupported activation '{name}'. Choose from: {ACTIVATIONS}.")
+def build_activation(name: str) -> nn.Module:
+    return ACTIVATIONS[name.lower()]()
 
 
 def alibi_slopes(num_heads: int) -> torch.Tensor:
@@ -100,7 +97,7 @@ class FeedForward(nn.Module):
             raise ValueError(f"Unsupported gate '{gate}'. Choose from: linear, none.")
         self.gate = gate
         self.up = nn.Linear(embedding_dim, feedforward_dim)
-        self.activation = build_activation(activation, feedforward_dim)
+        self.activation = build_activation(activation)
         self.value = nn.Linear(embedding_dim, feedforward_dim) if gate == "linear" else None
         self.down = nn.Linear(feedforward_dim, embedding_dim)
 
@@ -177,3 +174,28 @@ class TransformerLanguageModel(nn.Module):
         for block in self.blocks:
             hidden = block(hidden, segment_ids)
         return self.output(self.output_norm(hidden))
+
+
+# Model hyperparameters read from the flat config. Everything else in the config
+# (dataset, training, logging) is ignored here.
+MODEL_KEYS = (
+    "embedding_dim",
+    "num_layers",
+    "num_heads",
+    "feedforward_dim",
+    "activation",
+    "ffn_gate",
+    "intra_doc_masking",
+)
+
+
+def build_transformer(config: dict, *, vocab_size: int, bos_token_id: int | None = None):
+    """The single place a model is constructed from a flat config. max_sequence_length
+    is derived from the training sequence_length so it never has to be set twice."""
+    kwargs = {key: config[key] for key in MODEL_KEYS if key in config}
+    return TransformerLanguageModel(
+        vocab_size=vocab_size,
+        max_sequence_length=config["sequence_length"],
+        bos_token_id=bos_token_id,
+        **kwargs,
+    )

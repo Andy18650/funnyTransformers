@@ -13,8 +13,7 @@ experimental architectures over time.
   carved out of the train stream when a dataset ships no validation split.
 - Baseline Transformer with ALiBi positional biases.
 - Configurable feedforward `activation` (gelu, relu, tanh, sigmoid, silu,
-  softplus, sqrt_softplus, plus `scaled_tanh`/`scaled_sigmoid` with a
-  per-channel learnable scale).
+  softplus, sqrt_softplus).
 - Optional gated FFN via `ffn_gate` (`none` or `linear`) to build GLU variants
   such as SwiGLU (`activation: silu` + `ffn_gate: linear`).
 - Optional **intra-document masking**: tokens never attend across document
@@ -51,28 +50,39 @@ Available datasets: `tinystories`, `wikitext2`, `tinystories_clean`,
 
 ## Training
 
-Train the baseline Transformer on the prepared data:
+Train the Transformer on the prepared data:
 
 ```bash
-uv run ft-train \
-  --config configs/transformer.yaml \
-  --dataset fineweb_edu \
-  --wandb-project funny-transformers
+uv run ft-train --config configs/transformer.yaml
 ```
 
-Model and training hyperparameters live in `configs/transformer.yaml`,
-including `intra_doc_masking`. Checkpoints and the resolved config are written
-to `checkpoints/<dataset>/<timestamp-id>/`, and `checkpoints/latest` is a
-symlink updated to point at the most recent run. To run without logging, add
-`--no-wandb` (or `--wandb-mode disabled`).
+Everything is one flat config file (`configs/transformer.yaml`): the dataset,
+model architecture, all training hyperparameters, precision, and wandb settings
+are top-level keys. Any key can be overridden on the command line with
+`-o key=value`, repeatable, which is handy for quick sweeps or smoke tests:
 
-The wandb run name can be templated via `training.run_name`, a `str.format`
-string with access to any model/training field plus `{dataset}`,
-`{precision}`, `{param_count}`, and `{note}` — e.g. `"{activation}_{param_count}"`
-to name a run after whatever you are comparing. If unset, it defaults to
-`type_dataset_params[_note]`.
+```bash
+uv run ft-train --config configs/transformer.yaml \
+  -o dataset=fineweb_edu -o learning_rate=1e-4 -o steps=20000
+```
 
-Training requires CUDA. Precision is selected with `--precision`:
+A few ergonomic flags exist for things that change run-to-run without being part
+of the experiment definition: `--precision`, `--note`, `--output-dir`, and
+`--no-wandb` (disable logging for a smoke test). Override values are coerced as
+Python literals; an unknown key is written through silently and only surfaces as
+a `KeyError` where it would be used, so typos fail loudly at the right place.
+
+Checkpoints and the resolved `config.yaml` are written to
+`checkpoints/<dataset>/<timestamp-id>/`, and `checkpoints/latest` is a symlink
+updated to point at the most recent run.
+
+The wandb run name can be templated via the `run_name` config key, a
+`str.format` string over any config key plus `{param_count}` and `{note}` —
+e.g. `"{activation}_{ffn_gate}_{param_count}"` to name a run after whatever you
+are comparing. If unset, it defaults to `transformer_<dataset>_<param_count>[_note]`.
+
+Training requires CUDA. Precision is selected with `precision` (config or
+`--precision`):
 
 - `fp16` (default): autocast with a `GradScaler`; works on all CUDA GPUs.
 - `bf16`: autocast in bfloat16 (requires an Ampere+ GPU; exits with an error

@@ -9,9 +9,15 @@ import torch.nn.functional as F
 from tqdm import trange
 
 from ft.data import get_batch, load_processed_data
-from ft.models import build_model
-from ft.prepare_data import HF_DATASETS
-from ft.utils import count_parameters, load_yaml, perplexity, save_json, set_seed
+from ft.model import build_transformer
+from ft.utils import (
+    apply_overrides,
+    count_parameters,
+    load_config,
+    perplexity,
+    save_yaml,
+    set_seed,
+)
 
 
 def generate_run_id() -> str:
@@ -23,117 +29,46 @@ def generate_run_id() -> str:
 def update_latest_link(output_dir: Path, link_path: Path = Path("checkpoints/latest")) -> None:
     """Point a stable 'latest' symlink at this run's directory for easy reuse."""
     link_path.parent.mkdir(parents=True, exist_ok=True)
-    # Use a relative target so the link survives the tree being moved/copied.
+    # Relative target so the link survives the tree being moved/copied.
     target = Path(os.path.relpath(output_dir.resolve(), link_path.parent.resolve()))
-    try:
-        if link_path.is_symlink() or link_path.exists():
-            link_path.unlink()
-        link_path.symlink_to(target, target_is_directory=True)
-    except OSError as error:
-        # Symlinks may be unavailable (e.g. some Windows setups); not fatal.
-        print(f"warning: could not update {link_path} -> {target}: {error}")
+    if link_path.is_symlink() or link_path.exists():
+        link_path.unlink()
+    link_path.symlink_to(target, target_is_directory=True)
 
 
-def format_run_note(note: str | None) -> str:
-    if not note:
-        return ""
-    normalized = "_".join(note.strip().split())
-    return f"_{normalized}" if normalized else ""
-
-
-def render_run_name(config: dict, param_count: int) -> str:
-    """Build the run name.
-
-    If training.run_name is set, it is treated as a str.format template with
-    access to every model and training field plus a few computed values
-    (e.g. {activation}, {learning_rate}, {param_count}, {note}). This lets each
-    round name itself after whatever variable is being compared. Otherwise it
-    falls back to the default type_dataset_params[_note] scheme.
-    """
-    model_config = config["model"]
-    note = config.get("note")
-    fields = {
-        **config["training"],
-        **model_config,
-        "dataset": config["dataset"],
-        "precision": config.get("precision"),
-        "param_count": param_count,
-        "note": note or "",
-    }
-
-    template = config["training"].get("run_name")
+def render_run_name(config: dict) -> str:
+    """Build the run name. If run_name is set it is a str.format template over the
+    flat config (e.g. '{activation}_{ffn_gate}_{param_count}'); a bad field raises
+    KeyError. Otherwise fall back to transformer_<dataset>_<param_count>[_note]."""
+    template = config.get("run_name")
     if template:
-        try:
-            name = template.format(**fields)
-        except KeyError as error:
-            raise SystemExit(
-                f"error: run_name template references unknown field {error}. "
-                f"Available: {', '.join(sorted(fields))}."
-            )
-        return "_".join(name.strip().split())  # normalize whitespace
-
-    return (
-        f"{model_config['type'].lower()}_{config['dataset']}_{param_count}"
-        f"{format_run_note(note)}"
-    )
+        name = template.format(**config)
+    else:
+        name = f"transformer_{config['dataset']}_{config['param_count']}"
+        if config.get("note"):
+            name = f"{name}_{config['note']}"
+    return "_".join(name.strip().split())  # normalize whitespace
 
 
-def build_experiment_config(
-    config: dict,
-    dataset: str,
-    data_dir: str,
-    output_dir: str | None,
-    wandb_project: str,
-    wandb_mode: str,
-    swanlab_mode: str,
-    compile_model: bool,
-    note: str | None,
-    precision: str = "fp16",
-) -> dict:
-    model_config = dict(config["model"])
-    resolved_output_dir = output_dir or str(Path("checkpoints") / dataset / generate_run_id())
-    return {
-        "name": f"{model_config['type'].lower()}_{dataset}",
-        "dataset": dataset,
-        "tokenizer": "bpe",
-        "data_path": str(Path(data_dir) / f"{dataset}_bpe.pt"),
-        "output_dir": resolved_output_dir,
-        "model": model_config,
-        "training": dict(config["training"]),
-        "compile": compile_model,
-        "precision": precision,
-        "note": note,
-        "wandb": {
-            "project": wandb_project,
-            "mode": wandb_mode,
-            "swanlab_mode": swanlab_mode,
-            "group": dataset,
-            "tags": [dataset, "bpe", model_config["type"].lower()],
-        },
-    }
-
-
-def maybe_init_wandb(config: dict, enabled: bool):
-    if not enabled:
+def maybe_init_wandb(config: dict):
+    if config["wandb_mode"] == "disabled" or config.get("no_wandb"):
         return None
 
-    wandb_config = config["wandb"]
-    swanlab_mode = wandb_config.get("swanlab_mode", "disabled")
-    if swanlab_mode != "disabled":
+    if config["swanlab_mode"] != "disabled":
         import swanlab
 
         # SwanLab monkey-patches W&B logging, so this must happen before wandb.init().
-        swanlab.sync_wandb(mode=swanlab_mode)
+        swanlab.sync_wandb(mode=config["swanlab_mode"])
 
     import wandb
 
     return wandb.init(
-        project=wandb_config["project"],
+        project=config["wandb_project"],
         name=config["name"],
-        group=wandb_config["group"],
-        tags=wandb_config["tags"],
+        group=config["dataset"],
+        tags=[config["dataset"], "bpe", "transformer"],
         config=config,
-        mode=wandb_config["mode"],
+        mode=config["wandb_mode"],
     )
 
 
@@ -211,9 +146,8 @@ def save_checkpoint(
     )
 
 
-def train(config: dict, disable_wandb: bool = False) -> None:
-    training = config["training"]
-    set_seed(training.get("seed", 42))
+def train(config: dict) -> None:
+    set_seed(config.get("seed", 42))
 
     # Training assumes CUDA; there is no point training these models on CPU.
     if not torch.cuda.is_available():
@@ -221,72 +155,66 @@ def train(config: dict, disable_wandb: bool = False) -> None:
     device = torch.device("cuda")
 
     # --- Precision setup -------------------------------------------------
-    precision = config.get("precision", "fp16")
+    precision = config["precision"]
     if precision == "bf16" and not torch.cuda.is_bf16_supported():
         raise SystemExit(
             "error: bf16 precision requested but this GPU does not support it. "
-            "Use --precision fp16 or fp32."
+            "Use precision fp16 or fp32."
         )
     use_amp = precision in ("bf16", "fp16")
     amp_dtype = torch.float16 if precision == "fp16" else torch.bfloat16
     print(f"precision: {precision} (autocast={use_amp})")
 
-    data = validate_data_metadata(load_processed_data(config["data_path"]))
-
+    data_path = str(Path(config["data_dir"]) / f"{config['dataset']}_bpe.pt")
+    data = validate_data_metadata(load_processed_data(data_path))
     eos_token_id = data.get("eos_token_id")
-    model_config = dict(config["model"])
-    if model_config["type"].lower() == "transformer":
-        model_config.setdefault("max_sequence_length", training["sequence_length"])
-        model_config["bos_token_id"] = data.get("bos_token_id")
 
-    try:
-        model = build_model(model_config, vocab_size=data["vocab_size"]).to(device)
-    except RuntimeError as error:
-        raise SystemExit(f"error: failed to initialize model on CUDA: {error}")
-    param_count = count_parameters(model)
-    config["name"] = render_run_name(config, param_count)
-    if config.get("compile", False):
-        model = torch.compile(model)
+    model = build_transformer(
+        config,
+        vocab_size=data["vocab_size"],
+        bos_token_id=data.get("bos_token_id"),
+    ).to(device)
+    config["param_count"] = count_parameters(model)
+    config["name"] = render_run_name(config)
+    config["data_path"] = data_path
+    model = torch.compile(model)
+
     scaler = torch.amp.GradScaler(device.type, enabled=(precision == "fp16"))
     optimizer = torch.optim.AdamW(
         model.parameters(),
-        lr=training["learning_rate"],
-        weight_decay=training.get("weight_decay", 0.0),
+        lr=config["learning_rate"],
+        weight_decay=config.get("weight_decay", 0.0),
     )
 
-    output_dir = Path(config["output_dir"])
+    output_dir = Path(config.get("output_dir") or Path("checkpoints") / config["dataset"] / generate_run_id())
+    config["output_dir"] = str(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    save_json(config, output_dir / "config.json")
+    save_yaml(config, output_dir / "config.yaml")
     update_latest_link(output_dir)
 
-    run = maybe_init_wandb(config, enabled=not disable_wandb)
+    run = maybe_init_wandb(config)
     if run is not None:
-        run.summary["parameters"] = param_count
+        run.summary["parameters"] = config["param_count"]
         run.summary["device"] = str(device)
         run.summary["precision"] = precision
 
-    total_steps = training["steps"]
-    train_log_interval = training.get("train_log_interval", 50)
-    eval_interval = training.get("eval_interval", 500)
-    eval_iters = training.get("eval_iters", 20)
+    total_steps = config["steps"]
+    train_log_interval = config.get("train_log_interval", 50)
+    eval_interval = config.get("eval_interval", 500)
+    eval_iters = config.get("eval_iters", 20)
     best_val_loss = float("inf")
 
-    progress = trange(1, total_steps + 1, desc=config.get("name", "train"))
+    progress = trange(1, total_steps + 1, desc=config["name"])
     for step in progress:
         log_row = {}
-        x, y = get_batch(
-            data["train"],
-            training["batch_size"],
-            training["sequence_length"],
-            device,
-        )
+        x, y = get_batch(data["train"], config["batch_size"], config["sequence_length"], device)
         with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
             logits = model(x)
             loss = language_model_loss(logits, x, y, eos_token_id)
 
         optimizer.zero_grad(set_to_none=True)
         scaler.scale(loss).backward()
-        grad_clip = training.get("grad_clip")
+        grad_clip = config.get("grad_clip")
         if grad_clip is not None:
             # Unscale before clipping so the threshold applies to real gradients.
             scaler.unscale_(optimizer)
@@ -302,11 +230,11 @@ def train(config: dict, disable_wandb: bool = False) -> None:
             val_loss = evaluate(
                 model,
                 data["val"],
-                training["batch_size"],
-                training["sequence_length"],
+                config["batch_size"],
+                config["sequence_length"],
                 device,
                 eval_iters,
-                seed=training.get("seed", 42),
+                seed=config.get("seed", 42),
                 eos_token_id=eos_token_id,
                 amp_dtype=amp_dtype,
                 use_amp=use_amp,
@@ -330,53 +258,33 @@ def train(config: dict, disable_wandb: bool = False) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train a BPE-tokenized language model.")
     parser.add_argument("--config", required=True)
-    parser.add_argument(
-        "--dataset",
-        required=True,
-        choices=[*HF_DATASETS],
-        help="Prepared dataset name.",
-    )
-    parser.add_argument("--data-dir", default="data/processed")
-    parser.add_argument(
-        "--output-dir",
-        default=None,
-        help="Optional output directory. Defaults to checkpoints/<dataset>/<timestamp-id>.",
-    )
-    parser.add_argument("--wandb-project", required=True)
-    parser.add_argument("--wandb-mode", default="online", choices=["online", "offline", "disabled"])
-    parser.add_argument(
-        "--swanlab-mode",
-        default="disabled",
-        choices=["online", "local", "offline", "disabled"],
-        help="Sync W&B logs to SwanLab. SwanLab sync is disabled by default.",
-    )
-    parser.add_argument("--compile", action="store_true", help="Compile the model with torch.compile.")
-    parser.add_argument(
-        "--precision",
-        choices=["fp32", "bf16", "fp16"],
-        default="fp16",
-        help="Mixed-precision autocast dtype. Defaults to fp16 (with GradScaler).",
-    )
+    parser.add_argument("--precision", choices=["fp32", "bf16", "fp16"], default=None)
     parser.add_argument("--note", default=None, help="Optional suffix for the run name.")
+    parser.add_argument("--output-dir", default=None)
     parser.add_argument("--no-wandb", action="store_true", help="Disable W&B logging for this run.")
+    parser.add_argument(
+        "-o",
+        "--override",
+        action="append",
+        metavar="KEY=VALUE",
+        help="Override any config key, e.g. -o steps=2000 -o learning_rate=1e-4.",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    config = build_experiment_config(
-        load_yaml(args.config),
-        dataset=args.dataset,
-        data_dir=args.data_dir,
-        output_dir=args.output_dir,
-        wandb_project=args.wandb_project,
-        wandb_mode=args.wandb_mode,
-        swanlab_mode=args.swanlab_mode,
-        compile_model=args.compile,
-        note=args.note,
-        precision=args.precision,
-    )
-    train(config, disable_wandb=args.no_wandb or args.wandb_mode == "disabled")
+    config = apply_overrides(load_config(args.config), args.override)
+    # Named flags override the config only when explicitly provided.
+    if args.precision is not None:
+        config["precision"] = args.precision
+    if args.note is not None:
+        config["note"] = args.note
+    if args.output_dir is not None:
+        config["output_dir"] = args.output_dir
+    if args.no_wandb:
+        config["no_wandb"] = True
+    train(config)
 
 
 if __name__ == "__main__":

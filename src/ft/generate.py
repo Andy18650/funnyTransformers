@@ -4,9 +4,8 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 
-from ft.models import build_model
+from ft.model import build_transformer
 from ft.tokenization import decode_tokens, encode_text
-from ft.utils import select_device
 
 
 @torch.no_grad()
@@ -39,22 +38,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prompt", default="To be or not to")
     parser.add_argument("--max-new-tokens", type=int, default=200)
     parser.add_argument("--temperature", type=float, default=0.8)
-    parser.add_argument("--device", default="auto")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    device = torch.device("cuda")
     checkpoint = torch.load(Path(args.checkpoint), map_location="cpu", weights_only=False)
     config = checkpoint["config"]
-    training = config["training"]
-    device = select_device(args.device)
 
-    model_config = dict(config["model"])
-    if model_config["type"].lower() == "transformer":
-        model_config.setdefault("max_sequence_length", training["sequence_length"])
-
-    model = build_model(model_config, checkpoint["vocab_size"]).to(device)
+    model = build_transformer(config, vocab_size=checkpoint["vocab_size"]).to(device)
     model.load_state_dict(checkpoint["model_state"])
 
     tokenizer_meta = checkpoint["tokenizer"]
@@ -69,7 +62,7 @@ def main() -> None:
         input_ids,
         tokenizer_meta,
         args.max_new_tokens,
-        training["sequence_length"],
+        config["sequence_length"],
         args.temperature,
         device,
     )

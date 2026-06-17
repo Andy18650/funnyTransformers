@@ -1,28 +1,39 @@
-model:
-  type: transformer
-  embedding_dim: 384
-  num_layers: 4
-  num_heads: 4
-  feedforward_dim: 1536
-  # gelu | relu | tanh | sigmoid | silu | softplus | sqrt_softplus
-  # | scaled_tanh | scaled_sigmoid  (scaled_* add a per-channel learnable scale
-  # that frees the activation's output range)
-  activation: sqrt_softplus
-  ffn_gate: none  # none | linear  (linear adds a gated branch, e.g. silu+linear = SwiGLU)
-  intra_doc_masking: true
+# Flat experiment config. Every key is a top-level entry; CLI can override any
+# of them with -o key=value (and a few have dedicated flags). Sections below are
+# just comments for readability.
 
-training:
-  # Optional str.format template naming the run after whatever you compare this
-  # round. Fields: any model/training key plus {dataset} {precision}
-  # {param_count} {note}. Falls back to type_dataset_params[_note] if unset.
-  run_name: "{activation}_{param_count}"
-  batch_size: 64
-  sequence_length: 128
-  learning_rate: 0.0005
-  weight_decay: 0.01
-  steps: 5000
-  train_log_interval: 50
-  eval_interval: 500
-  eval_iters: 30
-  grad_clip: 1.0
-  seed: 42
+# --- data ---
+dataset: tinystories_clean
+data_dir: data/processed
+
+# --- model ---
+embedding_dim: 384
+num_layers: 4
+num_heads: 4
+feedforward_dim: 1024
+# gelu | relu | tanh | sigmoid | silu | softplus | sqrt_softplus
+activation: silu
+ffn_gate: linear  # none | linear  (linear adds a gated branch, e.g. silu+linear = SwiGLU)
+intra_doc_masking: true
+
+# --- training ---
+batch_size: 64
+sequence_length: 128
+learning_rate: 0.0005
+weight_decay: 0.01
+steps: 5000
+grad_clip: 1.0
+seed: 42
+train_log_interval: 50
+eval_interval: 500
+eval_iters: 30
+precision: fp16  # fp32 | bf16 | fp16
+# Optional str.format template naming the run after whatever you compare this
+# round. Fields: any config key plus {param_count} {note}. Falls back to
+# transformer_<dataset>_<param_count>[_note] if unset.
+run_name: "{activation}_{ffn_gate}_{param_count}"
+
+# --- logging ---
+wandb_project: funnyTransformers
+wandb_mode: online  # online | offline | disabled
+swanlab_mode: online  # online | local | offline | disabled

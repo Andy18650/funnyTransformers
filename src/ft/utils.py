@@ -1,6 +1,6 @@
-import json
 import math
 import random
+from ast import literal_eval
 from pathlib import Path
 from typing import Any
 
@@ -9,16 +9,31 @@ import torch
 import yaml
 
 
-def load_yaml(path: str | Path) -> dict[str, Any]:
+def load_config(path: str | Path) -> dict[str, Any]:
     with Path(path).open("r", encoding="utf-8") as file:
         return yaml.safe_load(file)
 
 
-def save_json(data: dict[str, Any], path: str | Path) -> None:
+def save_yaml(data: dict[str, Any], path: str | Path) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as file:
-        json.dump(data, file, indent=2)
+        yaml.safe_dump(data, file, sort_keys=False)
+
+
+def apply_overrides(config: dict[str, Any], overrides: list[str] | None) -> dict[str, Any]:
+    """Patch flat config keys from 'key=value' strings. Values are parsed as
+    Python literals (int/float/bool/list/...) when possible, else kept as str.
+    Unknown keys are written through without complaint -- a typo simply surfaces
+    later as a KeyError where the value is actually used."""
+    for item in overrides or []:
+        key, _, raw = item.partition("=")
+        try:
+            value = literal_eval(raw)
+        except (ValueError, SyntaxError):
+            value = raw
+        config[key] = value
+    return config
 
 
 def set_seed(seed: int) -> None:
@@ -35,11 +50,3 @@ def count_parameters(model: torch.nn.Module) -> int:
 
 def perplexity(loss: float) -> float:
     return math.exp(min(loss, 20.0))
-
-
-def select_device(device_name: str) -> torch.device:
-    if device_name == "auto":
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    if device_name == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("CUDA was requested but is not available.")
-    return torch.device(device_name)
