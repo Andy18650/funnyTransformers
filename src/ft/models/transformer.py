@@ -11,20 +11,6 @@ class SqrtSoftplus(nn.Module):
         return torch.sqrt(F.softplus(x))
 
 
-class ScaledActivation(nn.Module):
-    """A bounded activation with a per-channel learnable scale (like an RMSNorm
-    gain). Multiplying by a learned scale frees up the otherwise fixed output
-    range of saturating functions such as tanh ([-1, 1]) and sigmoid ([0, 1])."""
-
-    def __init__(self, fn, num_features: int) -> None:
-        super().__init__()
-        self.fn = fn
-        self.scale = nn.Parameter(torch.ones(num_features))
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.scale * self.fn(x)
-
-
 # Plain activations, instantiated with no arguments.
 ACTIVATIONS = {
     "gelu": nn.GELU,
@@ -36,21 +22,12 @@ ACTIVATIONS = {
     "sqrt_softplus": SqrtSoftplus,
 }
 
-# Activations with a per-channel learnable scale; need the feature dimension.
-SCALED_ACTIVATIONS = {
-    "scaled_tanh": torch.tanh,
-    "scaled_sigmoid": torch.sigmoid,
-}
-
 
 def build_activation(name: str, num_features: int) -> nn.Module:
     name = name.lower()
     if name in ACTIVATIONS:
         return ACTIVATIONS[name]()
-    if name in SCALED_ACTIVATIONS:
-        return ScaledActivation(SCALED_ACTIVATIONS[name], num_features)
-    valid = sorted([*ACTIVATIONS, *SCALED_ACTIVATIONS])
-    raise ValueError(f"Unsupported activation '{name}'. Choose from: {', '.join(valid)}.")
+    raise ValueError(f"Unsupported activation '{name}'. Choose from: {ACTIVATIONS}.")
 
 
 def alibi_slopes(num_heads: int) -> torch.Tensor:
