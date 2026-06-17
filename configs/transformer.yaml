@@ -34,6 +34,6 @@ precision: fp16  # fp32 | bf16 | fp16
 run_name: "{activation}_{ffn_gate}_{param_count}"
 
 # --- logging ---
-wandb_project: funnyTransformers
+wandb_project: ft-6-new-script
 wandb_mode: online  # online | offline | disabled
 swanlab_mode: online  # online | local | offline | disabled

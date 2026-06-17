@@ -1,5 +1,4 @@
 import argparse
-import os
 import secrets
 from datetime import datetime
 from pathlib import Path
@@ -17,37 +16,9 @@ from ft.utils import (
     perplexity,
     save_yaml,
     set_seed,
-)
-
-
-def generate_run_id() -> str:
-    # wandb-style unique id: sortable timestamp plus random suffix so that runs
-    # never collide, regardless of how similar their configurations are.
-    return f"{datetime.now():%Y%m%d-%H%M%S}-{secrets.token_hex(3)}"
-
-
-def update_latest_link(output_dir: Path, link_path: Path = Path("checkpoints/latest")) -> None:
-    """Point a stable 'latest' symlink at this run's directory for easy reuse."""
-    link_path.parent.mkdir(parents=True, exist_ok=True)
-    # Relative target so the link survives the tree being moved/copied.
-    target = Path(os.path.relpath(output_dir.resolve(), link_path.parent.resolve()))
-    if link_path.is_symlink() or link_path.exists():
-        link_path.unlink()
-    link_path.symlink_to(target, target_is_directory=True)
-
-
-def render_run_name(config: dict) -> str:
-    """Build the run name. If run_name is set it is a str.format template over the
-    flat config (e.g. '{activation}_{ffn_gate}_{param_count}'); a bad field raises
-    KeyError. Otherwise fall back to transformer_<dataset>_<param_count>[_note]."""
-    template = config.get("run_name")
-    if template:
-        name = template.format(**config)
-    else:
-        name = f"transformer_{config['dataset']}_{config['param_count']}"
-        if config.get("note"):
-            name = f"{name}_{config['note']}"
-    return "_".join(name.strip().split())  # normalize whitespace
+    update_latest_link,
+    render_run_name,
+)    
 
 
 def maybe_init_wandb(config: dict):
@@ -70,12 +41,6 @@ def maybe_init_wandb(config: dict):
         config=config,
         mode=config["wandb_mode"],
     )
-
-
-def validate_data_metadata(data: dict) -> dict:
-    if data.get("level") != "bpe" or data.get("tokenizer", {}).get("type") != "bpe":
-        raise ValueError("Expected BPE processed data. Re-run ft.prepare_data.")
-    return data
 
 
 def language_model_loss(
@@ -166,7 +131,7 @@ def train(config: dict) -> None:
     print(f"precision: {precision} (autocast={use_amp})")
 
     data_path = str(Path(config["data_dir"]) / f"{config['dataset']}_bpe.pt")
-    data = validate_data_metadata(load_processed_data(data_path))
+    data = load_processed_data(data_path)
     eos_token_id = data.get("eos_token_id")
 
     model = build_transformer(
@@ -185,8 +150,10 @@ def train(config: dict) -> None:
         lr=config["learning_rate"],
         weight_decay=config.get("weight_decay", 0.0),
     )
-
-    output_dir = Path(config.get("output_dir") or Path("checkpoints") / config["dataset"] / generate_run_id())
+    # wandb-style unique id: sortable timestamp plus random suffix so that runs
+    # never collide, regardless of how similar their configurations are.
+    run_id = f"{datetime.now():%Y%m%d-%H%M%S}-{secrets.token_hex(3)}"
+    output_dir = Path(config.get("output_dir") or Path("checkpoints") / config["dataset"] / run_id)
     config["output_dir"] = str(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     save_yaml(config, output_dir / "config.yaml")
