@@ -14,7 +14,19 @@ feedforward_dim: 1024
 # gelu | relu | tanh | sigmoid | silu | softplus | sqrt_softplus
 activation: silu
 ffn_gate: linear  # none | linear  (linear adds a gated branch, e.g. silu+linear = SwiGLU)
+# Drop W_o to let the residual stream split into per-head sub-streams (the next
+# block's pre-norm + FFN can still remix them).
+attention_output_proj: true
+# Per-block pre-norms: none | layernorm | rmsnorm (study normalization's effect
+# and its absence on deep models).
+attention_norm: layernorm
+feedforward_norm: layernorm
 intra_doc_masking: true
+# Gate the attention output (before W_o) with activation(W_gate @ pre_norm_input).
+# attention_gate: none | block (per token) | head (per head) | channel (per channel)
+# attention_gate_activation: none | silu | relu | gelu | sigmoid
+attention_gate: none
+attention_gate_activation: sigmoid
 
 # --- training ---
 batch_size: 64
@@ -29,11 +41,12 @@ eval_interval: 500
 eval_iters: 30
 precision: fp16  # fp32 | bf16 | fp16
 # Optional str.format template naming the run after whatever you compare this
-# round. Fields: any config key plus {param_count} {note}. Falls back to
-# transformer_<dataset>_<param_count>[_note] if unset.
-run_name: "{activation}_{ffn_gate}_{param_count}"
+# round. Fields: any config key plus {param_count}. The note (if any) is appended
+# automatically, so the template never needs {note}. Falls back to
+# transformer_<dataset>_<param_count> if unset.
+run_name: "{param_count}_Oproj-{attention_output_proj}_{attention_gate}_{attention_gate_activation}"
 
 # --- logging ---
-wandb_project: ft-6-new-script
+wandb_project: funnytransformers
 wandb_mode: online  # online | offline | disabled
 swanlab_mode: online  # online | local | offline | disabled

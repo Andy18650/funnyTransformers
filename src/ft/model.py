@@ -45,14 +45,65 @@ def alibi_slopes(num_heads: int) -> torch.Tensor:
     return torch.logspace(0, -3, steps=num_heads, base=2.0)
 
 
+class AttentionGate(nn.Module):
+    """Gates the attention output (before W_o) with a learned function of the
+    pre-normed input: attended * activation(W_gate @ x).
+
+    granularity: none | block (per token) | head (per head) | channel (per channel)
+    activation:  none | silu | relu | gelu | sigmoid
+    """
+
+    def __init__(
+        self,
+        embedding_dim: int,
+        num_heads: int,
+        granularity: str = "none",
+        activation: str = "none",
+    ) -> None:
+        super().__init__()
+        self.granularity = granularity
+        self.head_dim = embedding_dim // num_heads
+        if granularity == "none":
+            self.gate = None
+        elif granularity == "block":
+            self.gate = nn.Linear(embedding_dim, 1)
+        elif granularity == "head":
+            self.gate = nn.Linear(embedding_dim, num_heads)
+        elif granularity == "channel":
+            self.gate = nn.Linear(embedding_dim, embedding_dim)
+        else:
+            raise ValueError(
+                f"Unsupported attention_gate '{granularity}'. "
+                "Choose from: none, block, head, channel."
+            )
+        self.activation = nn.Identity() if activation == "none" else build_activation(activation)
+
+    def forward(self, attended: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+        if self.gate is None:
+            return attended
+        gate = self.activation(self.gate(x))
+        if self.granularity == "head":
+            # One value per head -> share it across that head's channels.
+            gate = gate.repeat_interleave(self.head_dim, dim=-1)
+        return attended * gate
+
+
 class AlibiSelfAttention(nn.Module):
-    def __init__(self, embedding_dim: int, num_heads: int, output_proj: bool = True) -> None:
+    def __init__(
+        self,
+        embedding_dim: int,
+        num_heads: int,
+        output_proj: bool = True,
+        gate: str = "none",
+        gate_activation: str = "none",
+    ) -> None:
         super().__init__()
         if embedding_dim % num_heads != 0:
             raise ValueError("embedding_dim must be divisible by num_heads.")
         self.num_heads = num_heads
         self.head_dim = embedding_dim // num_heads
         self.qkv = nn.Linear(embedding_dim, embedding_dim * 3)
+        self.gate = AttentionGate(embedding_dim, num_heads, gate, gate_activation)
         # Dropping W_o lets the residual stream specialize into per-head sub-streams;
         # the next block's pre-norm + FFN can still remix them. Identity keeps the
         # forward branch-free.
@@ -89,6 +140,7 @@ class AlibiSelfAttention(nn.Module):
             attn_mask=attn_mask,
         )
         attended = attended.transpose(1, 2).contiguous().view(batch_size, sequence_length, embedding_dim)
+        attended = self.gate(attended, hidden)
         return self.output(attended)
 
 
@@ -133,12 +185,20 @@ class TransformerBlock(nn.Module):
         activation: str = "gelu",
         ffn_gate: str = "none",
         attention_output_proj: bool = True,
+        attention_gate: str = "none",
+        attention_gate_activation: str = "none",
         attention_norm: str = "layernorm",
         feedforward_norm: str = "layernorm",
     ) -> None:
         super().__init__()
         self.attention_norm = build_norm(attention_norm, embedding_dim)
-        self.attention = AlibiSelfAttention(embedding_dim, num_heads, attention_output_proj)
+        self.attention = AlibiSelfAttention(
+            embedding_dim,
+            num_heads,
+            attention_output_proj,
+            attention_gate,
+            attention_gate_activation,
+        )
         self.feedforward_norm = build_norm(feedforward_norm, embedding_dim)
         self.feedforward = FeedForward(embedding_dim, feedforward_dim, activation, ffn_gate)
 
@@ -160,6 +220,8 @@ class TransformerLanguageModel(nn.Module):
         activation: str = "gelu",
         ffn_gate: str = "none",
         attention_output_proj: bool = True,
+        attention_gate: str = "none",
+        attention_gate_activation: str = "none",
         attention_norm: str = "layernorm",
         feedforward_norm: str = "layernorm",
         bos_token_id: int | None = None,
@@ -179,6 +241,8 @@ class TransformerLanguageModel(nn.Module):
                 activation,
                 ffn_gate,
                 attention_output_proj,
+                attention_gate,
+                attention_gate_activation,
                 attention_norm,
                 feedforward_norm,
             )
@@ -217,6 +281,8 @@ MODEL_KEYS = (
     "activation",
     "ffn_gate",
     "attention_output_proj",
+    "attention_gate",
+    "attention_gate_activation",
     "attention_norm",
     "feedforward_norm",
     "intra_doc_masking",
