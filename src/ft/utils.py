@@ -62,12 +62,20 @@ def update_latest_link(output_dir: Path, link_path: Path = Path("checkpoints/lat
 def render_run_name(config: dict) -> str:
     """Build the run name. If run_name is set it is a str.format template over the
     flat config (e.g. '{activation}_{ffn_gate}_{param_count}'); a bad field raises
-    KeyError. Otherwise fall back to transformer_<dataset>_<param_count>[_note]."""
+    KeyError. Otherwise fall back to transformer_<dataset>_<param_count>.
+
+    The note, if any, is appended automatically -- the template never needs to
+    mention {note}. (If a template explicitly references {note} it is left as-is,
+    to avoid appending it twice.)"""
     template = config.get("run_name")
     if template:
-        name = template.format(**config)
+        # Default note to "" so a template may still reference {note} without a
+        # note being set; normally the template omits it and we append below.
+        name = template.format(**{"note": "", **config})
+        append_note = "{note}" not in template
     else:
         name = f"transformer_{config['dataset']}_{config['param_count']}"
-        if config.get("note"):
-            name = f"{name}_{config['note']}"
+        append_note = True
+    if append_note and config.get("note"):
+        name = f"{name}_{config['note']}"
     return "_".join(name.strip().split())  # normalize whitespace
