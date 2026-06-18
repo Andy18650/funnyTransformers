@@ -27,20 +27,36 @@ def build_activation(name: str) -> nn.Module:
     return ACTIVATIONS[name.lower()]()
 
 
+# Normalization layers, instantiated with the feature dim. "none" disables the
+# norm entirely (Identity) for studying normalization's effect on deep models.
+NORMS = {
+    "none": lambda dim: nn.Identity(),
+    "layernorm": nn.LayerNorm,
+    "rmsnorm": nn.RMSNorm,
+}
+
+
+def build_norm(name: str, embedding_dim: int) -> nn.Module:
+    return NORMS[name.lower()](embedding_dim)
+
+
 def alibi_slopes(num_heads: int) -> torch.Tensor:
     # Simple monotonic slopes are enough here: each head gets a different distance penalty.
     return torch.logspace(0, -3, steps=num_heads, base=2.0)
 
 
 class AlibiSelfAttention(nn.Module):
-    def __init__(self, embedding_dim: int, num_heads: int) -> None:
+    def __init__(self, embedding_dim: int, num_heads: int, output_proj: bool = True) -> None:
         super().__init__()
         if embedding_dim % num_heads != 0:
             raise ValueError("embedding_dim must be divisible by num_heads.")
         self.num_heads = num_heads
         self.head_dim = embedding_dim // num_heads
         self.qkv = nn.Linear(embedding_dim, embedding_dim * 3)
-        self.output = nn.Linear(embedding_dim, embedding_dim)
+        # Dropping W_o lets the residual stream specialize into per-head sub-streams;
+        # the next block's pre-norm + FFN can still remix them. Identity keeps the
+        # forward branch-free.
+        self.output = nn.Linear(embedding_dim, embedding_dim) if output_proj else nn.Identity()
         self.register_buffer("slopes", alibi_slopes(num_heads).view(1, num_heads, 1, 1))
 
     def build_alibi_mask(self, sequence_length: int, device: torch.device) -> torch.Tensor:
@@ -116,11 +132,14 @@ class TransformerBlock(nn.Module):
         feedforward_dim: int,
         activation: str = "gelu",
         ffn_gate: str = "none",
+        attention_output_proj: bool = True,
+        attention_norm: str = "layernorm",
+        feedforward_norm: str = "layernorm",
     ) -> None:
         super().__init__()
-        self.attention_norm = nn.LayerNorm(embedding_dim)
-        self.attention = AlibiSelfAttention(embedding_dim, num_heads)
-        self.feedforward_norm = nn.LayerNorm(embedding_dim)
+        self.attention_norm = build_norm(attention_norm, embedding_dim)
+        self.attention = AlibiSelfAttention(embedding_dim, num_heads, attention_output_proj)
+        self.feedforward_norm = build_norm(feedforward_norm, embedding_dim)
         self.feedforward = FeedForward(embedding_dim, feedforward_dim, activation, ffn_gate)
 
     def forward(self, hidden: torch.Tensor, segment_ids: torch.Tensor | None = None) -> torch.Tensor:
@@ -140,6 +159,9 @@ class TransformerLanguageModel(nn.Module):
         feedforward_dim: int | None = None,
         activation: str = "gelu",
         ffn_gate: str = "none",
+        attention_output_proj: bool = True,
+        attention_norm: str = "layernorm",
+        feedforward_norm: str = "layernorm",
         bos_token_id: int | None = None,
         intra_doc_masking: bool = False,
     ) -> None:
@@ -150,7 +172,16 @@ class TransformerLanguageModel(nn.Module):
         self.intra_doc_masking = intra_doc_masking
         self.token_embedding = nn.Embedding(vocab_size, embedding_dim)
         self.blocks = nn.ModuleList(
-            TransformerBlock(embedding_dim, num_heads, feedforward_dim, activation, ffn_gate)
+            TransformerBlock(
+                embedding_dim,
+                num_heads,
+                feedforward_dim,
+                activation,
+                ffn_gate,
+                attention_output_proj,
+                attention_norm,
+                feedforward_norm,
+            )
             for _ in range(num_layers)
         )
         self.output_norm = nn.LayerNorm(embedding_dim)
@@ -185,6 +216,9 @@ MODEL_KEYS = (
     "feedforward_dim",
     "activation",
     "ffn_gate",
+    "attention_output_proj",
+    "attention_norm",
+    "feedforward_norm",
     "intra_doc_masking",
 )
 
