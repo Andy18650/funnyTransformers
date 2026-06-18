@@ -12,7 +12,7 @@ num_layers: 4
 num_heads: 4
 feedforward_dim: 1024
 # gelu | relu | tanh | sigmoid | silu | softplus | sqrt_softplus
-activation: silu
+activation: sigmoid
 ffn_gate: linear  # none | linear  (linear adds a gated branch, e.g. silu+linear = SwiGLU)
 intra_doc_masking: true
 
@@ -27,11 +27,14 @@ seed: 42
 train_log_interval: 50
 eval_interval: 500
 eval_iters: 30
+# How often to log heavier telemetry (activation magnitudes, ALiBi attention
+# behaviour, gradient extremes). Defaults to eval_interval; set 0 to disable.
+telemetry_interval: 500
 precision: fp16  # fp32 | bf16 | fp16
 # Optional str.format template naming the run after whatever you compare this
 # round. Fields: any config key plus {param_count} {note}. Falls back to
 # transformer_<dataset>_<param_count>[_note] if unset.
-run_name: "{activation}_{ffn_gate}_{param_count}"
+run_name: "{activation}_{ffn_gate}_{param_count}_{note}"
 
 # --- logging ---
 wandb_project: ft-6-new-script
