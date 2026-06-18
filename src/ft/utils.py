@@ -1,6 +1,5 @@
 import math
 import random
-from ast import literal_eval
 from pathlib import Path
 from typing import Any
 import os
@@ -23,17 +22,14 @@ def save_yaml(data: dict[str, Any], path: str | Path) -> None:
 
 
 def apply_overrides(config: dict[str, Any], overrides: list[str] | None) -> dict[str, Any]:
-    """Patch flat config keys from 'key=value' strings. Values are parsed as
-    Python literals (int/float/bool/list/...) when possible, else kept as str.
-    Unknown keys are written through without complaint -- a typo simply surfaces
-    later as a KeyError where the value is actually used."""
+    """Patch flat config keys from 'key=value' strings. The value is parsed with
+    the YAML scalar parser, so it follows the exact same rules as the config file
+    (true/false, null, ints, floats, lists, plain strings). Unknown keys are
+    written through without complaint -- a typo simply surfaces later as a
+    KeyError where the value is actually used."""
     for item in overrides or []:
         key, _, raw = item.partition("=")
-        try:
-            value = literal_eval(raw)
-        except (ValueError, SyntaxError):
-            value = raw
-        config[key] = value
+        config[key] = yaml.safe_load(raw)
     return config
 
 
