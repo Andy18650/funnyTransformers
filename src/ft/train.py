@@ -224,7 +224,12 @@ def train(config: dict) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train a BPE-tokenized language model.")
-    parser.add_argument("--config", required=True)
+    parser.add_argument("--config", default="configs/transformer.yaml")
+    parser.add_argument(
+        "--run_config",
+        default="configs/run.yaml",
+        help="Run-specific override file layered on top of --config. Ignored if missing.",
+    )
     parser.add_argument("--precision", choices=["fp32", "bf16", "fp16"], default=None)
     parser.add_argument("--note", default=None, help="Optional suffix for the run name.")
     parser.add_argument("--output-dir", default=None)
@@ -241,7 +246,11 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    config = apply_overrides(load_config(args.config), args.override)
+    config = load_config(args.config)
+    # Layer a run-specific override file (if present) between config and --override.
+    if Path(args.run_config).exists():
+        config.update(load_config(args.run_config) or {})
+    apply_overrides(config, args.override)
     # Named flags override the config only when explicitly provided.
     if args.precision is not None:
         config["precision"] = args.precision

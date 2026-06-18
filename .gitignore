@@ -9,6 +9,8 @@ checkpoints/
 wandb/
 swanlog/
 
+configs/run.yaml
+
 uv.lock
 
 *.egg-info/
