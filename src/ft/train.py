@@ -9,7 +9,6 @@ from tqdm import trange
 
 from ft.data import get_batch, load_processed_data
 from ft.model import build_transformer
-from ft.telemetry import collect_forward_telemetry, gradient_stats
 from ft.utils import (
     apply_overrides,
     count_parameters,
@@ -60,28 +59,6 @@ def language_model_loss(
         targets.reshape(-1),
         ignore_index=-100,
     )
-
-
-@torch.no_grad()
-def forward_telemetry(
-    model: torch.nn.Module,
-    x: torch.Tensor,
-    device: torch.device,
-    amp_dtype: torch.dtype | None,
-    use_amp: bool,
-) -> dict[str, float]:
-    """Run one eager forward on the uncompiled model to collect activation and
-    attention stats. Eager because the attention-score recompute can't run inside
-    the fused SDPA path that torch.compile uses on the hot path."""
-    base = getattr(model, "_orig_mod", model)
-    was_training = base.training
-    base.eval()
-    with collect_forward_telemetry(base) as stats:
-        with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
-            base(x)
-    if was_training:
-        base.train()
-    return stats
 
 
 @torch.no_grad()
@@ -192,13 +169,11 @@ def train(config: dict) -> None:
     train_log_interval = config.get("train_log_interval", 50)
     eval_interval = config.get("eval_interval", 500)
     eval_iters = config.get("eval_iters", 20)
-    telemetry_interval = config.get("telemetry_interval", eval_interval)
     best_val_loss = float("inf")
 
     progress = trange(1, total_steps + 1, desc=config["name"])
     for step in progress:
         log_row = {}
-        collect_telemetry = telemetry_interval and (step % telemetry_interval == 0 or step == total_steps)
         x, y = get_batch(data["train"], config["batch_size"], config["sequence_length"], device)
         with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
             logits = model(x)
@@ -207,19 +182,12 @@ def train(config: dict) -> None:
         optimizer.zero_grad(set_to_none=True)
         scaler.scale(loss).backward()
         grad_clip = config.get("grad_clip")
-        # Unscale before clipping (so the threshold applies to real gradients) and
-        # before reading gradient telemetry (so the stats reflect true gradients).
-        if grad_clip is not None or collect_telemetry:
-            scaler.unscale_(optimizer)
-        if collect_telemetry:
-            log_row.update(gradient_stats(model))
         if grad_clip is not None:
+            # Unscale before clipping so the threshold applies to real gradients.
+            scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
         scaler.step(optimizer)
         scaler.update()
-
-        if collect_telemetry:
-            log_row.update(forward_telemetry(model, x, device, amp_dtype, use_amp))
 
         if step % train_log_interval == 0 or step == total_steps:
             log_row["train_loss"] = loss.item()

@@ -42,10 +42,6 @@ class AlibiSelfAttention(nn.Module):
         self.qkv = nn.Linear(embedding_dim, embedding_dim * 3)
         self.output = nn.Linear(embedding_dim, embedding_dim)
         self.register_buffer("slopes", alibi_slopes(num_heads).view(1, num_heads, 1, 1))
-        # When True, forward recomputes attention scores in eager mode and stashes
-        # a summary in self.attn_stats. Off by default so normal steps use fast SDPA.
-        self.collect_attn_stats = False
-        self.attn_stats: dict[str, float] | None = None
 
     def build_alibi_mask(self, sequence_length: int, device: torch.device) -> torch.Tensor:
         positions = torch.arange(sequence_length, device=device)
@@ -70,34 +66,14 @@ class AlibiSelfAttention(nn.Module):
             attn_mask = attn_mask.expand(batch_size, -1, -1, -1).masked_fill(
                 cross_document, float("-inf")
             )
-
-        if self.collect_attn_stats:
-            # Eager recompute so we can inspect the realized post-softmax attention,
-            # which the fused SDPA kernel never materializes. Telemetry-only path.
-            attended = self._attend_with_stats(q, k, v, attn_mask, sequence_length)
-        else:
-            attended = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
+        attended = F.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            attn_mask=attn_mask,
+        )
         attended = attended.transpose(1, 2).contiguous().view(batch_size, sequence_length, embedding_dim)
         return self.output(attended)
-
-    @torch.no_grad()
-    def _attend_with_stats(self, q, k, v, attn_mask, sequence_length):
-        scores = (q @ k.transpose(-2, -1)) / (self.head_dim ** 0.5) + attn_mask
-        weights = torch.softmax(scores, dim=-1)  # (B, H, T, T)
-        # Mean softmax weight placed on the first token, averaged over batch/queries,
-        # per head -- low values mean early tokens are being starved by ALiBi.
-        first_token_attn = weights[..., 0].mean(dim=(0, 2))  # (H,)
-        # Expected query-key distance attended to, per head (locality of attention).
-        positions = torch.arange(sequence_length, device=weights.device)
-        distance = (positions[:, None] - positions[None, :]).abs().float()  # (T, T)
-        mean_distance = (weights * distance).sum(dim=-1).mean(dim=(0, 2))  # (H,)
-        self.attn_stats = {
-            "first_token_attn_mean": first_token_attn.mean().item(),
-            "first_token_attn_min": first_token_attn.min().item(),
-            "attn_distance_mean": mean_distance.mean().item(),
-            "attn_distance_max": mean_distance.max().item(),
-        }
-        return weights @ v
 
 
 class FeedForward(nn.Module):
