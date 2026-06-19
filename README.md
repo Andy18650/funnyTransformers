@@ -19,6 +19,7 @@ experimental architectures over time.
 - Optional **intra-document masking**: tokens never attend across document
   boundaries within a packed training window (toggle in the config).
 - Training with Weights & Biases / SwanLab logging.
+- **Multi-GPU training** via Distributed Data Parallel (DDP).
 
 ## Setup
 
@@ -67,8 +68,8 @@ uv run ft-train --config configs/transformer.yaml \
 ```
 
 A few ergonomic flags exist for things that change run-to-run without being part
-of the experiment definition: `--precision`, `--note`, `--output-dir`, and
-`--no-wandb` (disable logging for a smoke test). Override values are coerced as
+of the experiment definition: `--precision`, `--note`, `--output-dir`, `--num-gpus`,
+and `--no-wandb` (disable logging for a smoke test). Override values are coerced as
 Python literals; an unknown key is written through silently and only surfaces as
 a `KeyError` where it would be used, so typos fail loudly at the right place.
 
@@ -88,6 +89,24 @@ Training requires CUDA. Precision is selected with `precision` (config or
 - `bf16`: autocast in bfloat16 (requires an Ampere+ GPU; exits with an error
   otherwise).
 - `fp32`: full precision, for highest-precision sanity checks.
+
+### Multi-GPU Training
+
+For multi-GPU training using Distributed Data Parallel (DDP), use the `--num-gpus` flag:
+
+```bash
+# Train on 4 GPUs
+uv run ft-train --config configs/transformer.yaml --num-gpus 4
+```
+
+DDP training is fully integrated with all existing features:
+- Gradient synchronization across GPUs
+- Rank-0 checkpoint saving and logging
+- Progress bars and metrics only displayed on rank 0
+- Compatible with mixed precision training (fp16/bf16)
+- Works with all config overrides and flags
+
+Single-GPU training remains the default behavior (no `--num-gpus` flag needed).
 
 ## Generation
 

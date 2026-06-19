@@ -1,9 +1,12 @@
 import argparse
+import os
 import secrets
 from datetime import datetime
 from pathlib import Path
 
 import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
 import torch.nn.functional as F
 from tqdm import trange
 
@@ -21,8 +24,11 @@ from ft.utils import (
 )    
 
 
-def maybe_init_wandb(config: dict):
+def maybe_init_wandb(config: dict, rank: int = 0):
     if config["wandb_mode"] == "disabled" or config.get("no_wandb"):
+        return None
+
+    if rank != 0:
         return None
 
     if config["swanlab_mode"] != "disabled":
@@ -111,24 +117,37 @@ def save_checkpoint(
     )
 
 
-def train(config: dict) -> None:
-    set_seed(config.get("seed", 42))
-
-    # Training assumes CUDA; there is no point training these models on CPU.
-    if not torch.cuda.is_available():
-        raise SystemExit("error: CUDA is required for training but is not available.")
-    device = torch.device("cuda")
+def train(config: dict, rank: int = 0, world_size: int = 1) -> None:
+    if world_size > 1:
+        dist.init_process_group("nccl", rank=rank, world_size=world_size)
+        torch.cuda.set_device(rank)
+        device = torch.device(f"cuda:{rank}")
+        is_main = rank == 0
+        set_seed(config.get("seed", 42) + rank)
+    else:
+        set_seed(config.get("seed", 42))
+        # Training assumes CUDA; there is no point training these models on CPU.
+        if not torch.cuda.is_available():
+            raise SystemExit("error: CUDA is required for training but is not available.")
+        device = torch.device("cuda")
+        is_main = True
 
     # --- Precision setup -------------------------------------------------
     precision = config["precision"]
     if precision == "bf16" and not torch.cuda.is_bf16_supported():
-        raise SystemExit(
-            "error: bf16 precision requested but this GPU does not support it. "
-            "Use precision fp16 or fp32."
-        )
+        if is_main:
+            raise SystemExit(
+                "error: bf16 precision requested but this GPU does not support it. "
+                "Use precision fp16 or fp32."
+            )
+        else:
+            dist.destroy_process_group()
+            return
+
     use_amp = precision in ("bf16", "fp16")
     amp_dtype = torch.float16 if precision == "fp16" else torch.bfloat16
-    print(f"precision: {precision} (autocast={use_amp})")
+    if is_main:
+        print(f"precision: {precision} (autocast={use_amp})")
 
     data_path = str(Path(config["data_dir"]) / f"{config['dataset']}_bpe.pt")
     data = load_processed_data(data_path)
@@ -139,6 +158,10 @@ def train(config: dict) -> None:
         vocab_size=data["vocab_size"],
         bos_token_id=data.get("bos_token_id"),
     ).to(device)
+    
+    if world_size > 1:
+        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[rank])
+
     config["param_count"] = count_parameters(model)
     config["name"] = render_run_name(config)
     config["data_path"] = data_path
@@ -150,20 +173,26 @@ def train(config: dict) -> None:
         lr=config["learning_rate"],
         weight_decay=config.get("weight_decay", 0.0),
     )
-    # wandb-style unique id: sortable timestamp plus random suffix so that runs
-    # never collide, regardless of how similar their configurations are.
-    run_id = f"{datetime.now():%Y%m%d-%H%M%S}-{secrets.token_hex(3)}"
-    output_dir = Path(config.get("output_dir") or Path("checkpoints") / config["dataset"] / run_id)
-    config["output_dir"] = str(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    save_yaml(config, output_dir / "config.yaml")
-    update_latest_link(output_dir)
+    
+    if is_main:
+        # wandb-style unique id: sortable timestamp plus random suffix so that runs
+        # never collide, regardless of how similar their configurations are.
+        run_id = f"{datetime.now():%Y%m%d-%H%M%S}-{secrets.token_hex(3)}"
+        output_dir = Path(config.get("output_dir") or Path("checkpoints") / config["dataset"] / run_id)
+        config["output_dir"] = str(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        save_yaml(config, output_dir / "config.yaml")
+        update_latest_link(output_dir)
+    else:
+        output_dir = None
 
-    run = maybe_init_wandb(config)
+    run = maybe_init_wandb(config, rank)
     if run is not None:
         run.summary["parameters"] = config["param_count"]
         run.summary["device"] = str(device)
         run.summary["precision"] = precision
+        if world_size > 1:
+            run.summary["world_size"] = world_size
 
     total_steps = config["steps"]
     train_log_interval = config.get("train_log_interval", 50)
@@ -171,7 +200,11 @@ def train(config: dict) -> None:
     eval_iters = config.get("eval_iters", 20)
     best_val_loss = float("inf")
 
-    progress = trange(1, total_steps + 1, desc=config["name"])
+    if is_main:
+        progress = trange(1, total_steps + 1, desc=config["name"])
+    else:
+        progress = range(1, total_steps + 1)
+    
     for step in progress:
         log_row = {}
         x, y = get_batch(data["train"], config["batch_size"], config["sequence_length"], device)
@@ -190,8 +223,9 @@ def train(config: dict) -> None:
         scaler.update()
 
         if step % train_log_interval == 0 or step == total_steps:
-            log_row["train_loss"] = loss.item()
-            progress.set_postfix(train_loss=f"{loss.item():.3f}")
+            if is_main:
+                log_row["train_loss"] = loss.item()
+                progress.set_postfix(train_loss=f"{loss.item():.3f}")
 
         if step % eval_interval == 0 or step == total_steps:
             val_loss = evaluate(
@@ -206,20 +240,25 @@ def train(config: dict) -> None:
                 amp_dtype=amp_dtype,
                 use_amp=use_amp,
             )
-            log_row["val_loss"] = val_loss
-            log_row["val_perplexity"] = perplexity(val_loss)
-            progress.set_postfix(train_loss=f"{loss.item():.3f}", val_loss=f"{val_loss:.3f}")
+            if is_main:
+                log_row["val_loss"] = val_loss
+                log_row["val_perplexity"] = perplexity(val_loss)
+                progress.set_postfix(train_loss=f"{loss.item():.3f}", val_loss=f"{val_loss:.3f}")
 
-            if val_loss < best_val_loss:
+            if val_loss < best_val_loss and is_main:
                 best_val_loss = val_loss
                 save_checkpoint(output_dir / "best.pt", model, config, data, step, val_loss)
 
         if run is not None and log_row:
             run.log(log_row, step=step)
 
-    save_checkpoint(output_dir / "last.pt", model, config, data, total_steps, best_val_loss)
-    if run is not None:
-        run.finish()
+    if is_main:
+        save_checkpoint(output_dir / "last.pt", model, config, data, total_steps, best_val_loss)
+        if run is not None:
+            run.finish()
+    
+    if world_size > 1:
+        dist.destroy_process_group()
 
 
 def parse_args() -> argparse.Namespace:
@@ -241,7 +280,12 @@ def parse_args() -> argparse.Namespace:
         metavar="KEY=VALUE",
         help="Override any config key, e.g. -o steps=2000 -o learning_rate=1e-4.",
     )
+    parser.add_argument("--num-gpus", type=int, default=1, help="Number of GPUs to use for DDP training.")
     return parser.parse_args()
+
+
+def train_wrapper(rank: int, config: dict, world_size: int) -> None:
+    train(config, rank, world_size)
 
 
 def main() -> None:
@@ -260,7 +304,16 @@ def main() -> None:
         config["output_dir"] = args.output_dir
     if args.no_wandb:
         config["no_wandb"] = True
-    train(config)
+    
+    world_size = args.num_gpus
+    if world_size > 1:
+        if world_size > torch.cuda.device_count():
+            raise SystemExit(f"error: Requested {world_size} GPUs but only {torch.cuda.device_count()} available.")
+        os.environ["MASTER_ADDR"] = "localhost"
+        os.environ["MASTER_PORT"] = "12355"
+        mp.spawn(train_wrapper, args=(config, world_size), nprocs=world_size, join=True)
+    else:
+        train(config)
 
 
 if __name__ == "__main__":
